@@ -724,7 +724,9 @@ function viewRoom(code) {
     // status line
     const mover = s.players.find((p) => p.seat === s.turn);
     let st = "";
-    if (!s.ready) st = s.mode === "claude" ? "Waiting for you to join…" : '<span class="spinner"></span> Waiting for your friend to join…';
+    if (s.closed) st = "🏁 Match over";
+    else if (s.paused) st = "⏸ Paused - the computer moves while someone has this page open";
+    else if (!s.ready) st = s.mode === "claude" ? "Waiting for you to join…" : '<span class="spinner"></span> Waiting for your friend to join…';
     else if (s.winner !== null) {
       st = s.nextAt ? `Next game in <b id="cd">${Math.max(0, Math.ceil((s.nextAt - Date.now()) / 1000))}</b>s…` : "";
     } else if (myTurn) st = "Your turn";
@@ -737,7 +739,15 @@ function viewRoom(code) {
     if (s.nextAt) countdownT = setInterval(() => { const cd = $("#cd"); if (cd) cd.textContent = Math.max(0, Math.ceil((s.nextAt - Date.now()) / 1000)); }, 500);
 
     // result overlay
-    if (s.winner !== null) {
+    if (s.closed) {
+      const [a, b] = s.players;
+      const champ = a.wins === b.wins ? "It's a tie!" : `${(a.wins > b.wins ? a : b).name} wins the match!`;
+      const card = resultCard({
+        title: "🏁 Match over", sub: `${esc(a.name)} <b>${a.wins}</b> - <b>${b.wins}</b> ${esc(b.name)}${s.draws ? ` · ${s.draws} draw${s.draws > 1 ? "s" : ""}` : ""}<br>${esc(champ)}`,
+        buttons: [{ label: "New match", href: "/watch" }, { label: "AI leaderboard", cls: "ghost", href: "/leaderboard?who=ai" }],
+      });
+      setTimeout(() => state === s && board.overlay(card), animate ? 650 : 0);
+    } else if (s.winner !== null) {
       const youWon = s.winner === me, draw = s.winner === 0;
       const winnerName = s.players.find((p) => p.seat === s.winner)?.name;
       const opp = s.players.find((p) => p.seat !== me);
@@ -746,7 +756,7 @@ function viewRoom(code) {
         if (youWon || (me === null && !draw)) { sfx.win(); confetti(); } else if (draw) sfx.win(); else sfx.lose();
       }
       const iAsked = s.rematch.includes(me), theyAsked = s.rematch.some((x) => x !== null && x !== me);
-      const sub = arena ? `${s.moves.length} moves · score ${s.players[0].wins}-${s.players[1].wins}`
+      const sub = arena ? `Game ${s.game + 1}${s.maxGames ? ` of ${s.maxGames}` : ""} · ${s.moves.length} moves · score ${s.players[0].wins}-${s.players[1].wins}`
         : me === null ? "" : iAsked ? "Waiting for your opponent to accept the rematch…" : theyAsked ? `<b>${esc(opp?.name)} wants a rematch!</b>` : `${s.moves.length} moves`;
       const btns = [];
       if (arena) btns.push({ label: s.nextAt ? "Start now" : "Next game", onClick: () => send({ type: "rematch" }) });
@@ -768,10 +778,13 @@ function viewRoom(code) {
       const box = h(`<div class="panel stack sect"><h3>✨ Claude ${two ? "players" : ""}</h3>
         <p style="margin:0" class="muted">Paste into ${two ? "two separate Claude chats" : "your Claude chat"} (Connect Four MCP connected):</p></div>`);
       for (const c of claudes) {
-        const prompt = two
+        const modelHint = c.model ? ` (This seat is for ${c.name.replace(/ \([AB]\)$/, "")} - always pass your real model id.)` : " Always pass your real model id.";
+        const prompt0 = two
           ? `Let's play Connect Four! Join room ${code} as player ${c.id} with the connect-four tools and keep playing until I say stop.`
           : arena ? `Let's play Connect Four! Join room ${code} with the connect-four tools and keep playing until I say stop.`
           : `Let's play Connect Four! Join room ${code} with the connect-four tools and play until the game ends.`;
+        const prompt = prompt0 + modelHint;
+        if (two || c.model) box.append(h(`<div class="muted" style="font-size:.85rem;margin-top:4px"><b>${esc(c.name)}</b>${c.model ? ` - start it with <code>claude --model ${esc(c.model)}</code> (or <code>/model</code>)` : ""}</div>`));
         const row = h(`<div class="copy-box"><code>${esc(prompt)}</code><button class="btn small">Copy</button></div>`);
         $("button", row).onclick = () => copy(prompt, `Prompt${two ? ` for player ${c.id}` : ""} copied - paste it to Claude`);
         box.append(row);
@@ -779,13 +792,22 @@ function viewRoom(code) {
       box.append(h('<a href="/claude" data-link>Setup guide →</a>'));
       side.append(box);
     }
-    if (arena) {
+    if (arena && !s.closed) {
       const set = h(`<div class="panel stack sect"><h3>Match settings</h3>
+        <div class="row" style="gap:8px"><span class="muted" style="font-weight:600">Games</span>
+          <div class="seg" id="mg">${[[1, "1"], [3, "3"], [5, "5"], [10, "10"], [0, "∞"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${s.maxGames === v}">${l}</button>`).join("")}</div></div>
+        <div class="muted" style="font-size:.85rem;margin-top:-6px">Game ${s.game + 1}${s.maxGames ? ` of ${s.maxGames}` : " (no limit)"}</div>
         <div class="seg" id="spd">${["fast", "normal", "slow"].map((v) => `<button data-v="${v}" aria-pressed="${s.speed === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join("")}</div>
         <label class="switch"><input type="checkbox" id="auto" ${s.autoNext ? "checked" : ""}/> Auto-play next game</label>
         <div class="copy-box"><code>${esc(link)}</code><button class="btn small" id="cl">Copy</button></div>
         <p class="muted" style="margin:0;font-size:.85rem">Computer moves are calculated in watchers' browsers - the match pauses when nobody is watching.</p></div>`);
       $$("#spd button", set).forEach((b) => (b.onclick = () => send({ type: "settings", speed: b.dataset.v })));
+      $$("#mg button", set).forEach((b) => (b.onclick = () => send({ type: "settings", maxGames: Number(b.dataset.v) })));
+      if (s.canEnd) {
+        const end = h('<button class="btn danger">⏹ End match</button>');
+        end.onclick = () => { if (confirm("End this match for everyone?")) send({ type: "end" }); };
+        set.append(end);
+      }
       $("#auto", set).onchange = (e) => send({ type: "settings", autoNext: e.target.checked });
       $("#cl", set).onclick = () => copy(link, "Link copied");
       side.append(set);
@@ -823,7 +845,13 @@ function viewRoom(code) {
 }
 
 /* ---------------- watch: create AI-vs-AI matches, live list */
-const SEAT_OPTIONS = [["claude", "✨ Claude (via MCP)"], ...Object.keys(LEVELS).map((k) => [`ai:${k}`, `🤖 Computer · ${LEVELS[k].name}`])];
+// Claude seats can pre-select a model (used for the leaderboard if Claude doesn't report its own id)
+const CLAUDE_MODELS = [["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"], ["claude-haiku-5-5", "Haiku 5.5"], ["claude-fable-5-2", "Fable 5.2"]];
+const SEAT_OPTIONS = [
+  ["claude", "✨ Claude (any model)"],
+  ...CLAUDE_MODELS.map(([id, n]) => [`claude:${id}`, `✨ Claude ${n}`]),
+  ...Object.keys(LEVELS).map((k) => [`ai:${k}`, `🤖 Computer · ${LEVELS[k].name}`]),
+];
 function liveList(rooms) {
   if (!rooms.length) return '<div class="empty">No live matches right now - start one!</div>';
   return `<div class="live-list">${rooms.map((r) => `<a class="live" href="/r/${esc(r.id)}" data-link>
@@ -832,7 +860,7 @@ function liveList(rooms) {
     <span class="btn small ghost">Watch</span></a>`).join("")}</div>`;
 }
 function viewWatch() {
-  let red = ls.get("c4.arena.red", "ai:master"), yellow = ls.get("c4.arena.yellow", "ai:hard"), speed = "normal", auto = true;
+  let red = ls.get("c4.arena.red", "ai:master"), yellow = ls.get("c4.arena.yellow", "ai:hard"), speed = "normal", auto = true, maxGames = 3;
   const sel = (id, v) => `<select class="input" id="${id}">${SEAT_OPTIONS.map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
   app.innerHTML = `
     <div class="page-head"><div class="eyebrow">Spectate</div><h1>Watch AI vs AI</h1>
@@ -848,6 +876,9 @@ function viewWatch() {
         <div class="row"><span class="muted" style="font-weight:600">Speed</span>
           <div class="seg" id="w-speed">${["fast", "normal", "slow"].map((v) => `<button data-v="${v}" aria-pressed="${v === speed}">${v[0].toUpperCase() + v.slice(1)}</button>`).join("")}</div>
           <label class="switch"><input type="checkbox" id="w-auto" checked /> Auto-play next game</label></div>
+        <div class="row"><span class="muted" style="font-weight:600">Games</span>
+          <div class="seg" id="w-games">${[[1, "1"], [3, "3"], [5, "5"], [10, "10"], [0, "∞"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === maxGames}">${l}</button>`).join("")}</div>
+          <span class="muted" style="font-size:.85rem">The match ends after this many games (or press End match).</span></div>
         <div class="row">
           <button class="btn" id="w-go">Start match</button>
           <button class="btn ghost" id="w-quick">⚡ Quick: Master vs Expert</button>
@@ -857,7 +888,7 @@ function viewWatch() {
       <div class="card"><div class="chart-head"><h3 style="margin:0">🔴 Live now</h3><a href="/chat" data-link>General chat →</a></div><div id="live"><div class="empty"><span class="spinner"></span></div></div></div>
     </div>`;
   const note = () => {
-    const n = [red, yellow].filter((v) => v === "claude").length;
+    const n = [red, yellow].filter((v) => v.startsWith("claude")).length;
     $("#w-note").hidden = !n;
     $("#w-note").innerHTML = n === 2
       ? "Two Claude seats: after starting, copy the prompt for player A into one Claude chat and player B into another (they can be different models, e.g. Opus vs Sonnet)."
@@ -868,10 +899,11 @@ function viewWatch() {
   $("#yellow").onchange = (e) => { yellow = e.target.value; ls.set("c4.arena.yellow", yellow); note(); };
   $$("#w-speed button").forEach((b) => (b.onclick = () => { speed = b.dataset.v; $$("#w-speed button").forEach((x) => x.setAttribute("aria-pressed", x === b)); }));
   $("#w-auto").onchange = (e) => (auto = e.target.checked);
+  $$("#w-games button").forEach((b) => (b.onclick = () => { maxGames = Number(b.dataset.v); $$("#w-games button").forEach((x) => x.setAttribute("aria-pressed", x === b)); }));
   const create = async (r, y, btn) => {
     btn.disabled = true;
     try {
-      const res = await api("/api/rooms", { method: "POST", body: { mode: "arena", red: r, yellow: y, speed, autoNext: auto } });
+      const res = await api("/api/rooms", { method: "POST", body: { mode: "arena", red: r, yellow: y, speed, autoNext: auto, maxGames } });
       ls.set(`c4.room.${res.id}`, res.token);
       navigate(`/r/${res.id}`);
     } catch (e) { toast(e.message); btn.disabled = false; }

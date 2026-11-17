@@ -82,7 +82,7 @@ export class Lobby extends DurableObject<Env> {
       }
       case "/room": {
         const r = (await req.json()) as LiveRoom;
-        this.rooms.set(r.id, r);
+        if (r.status === "ended") this.rooms.delete(r.id); else this.rooms.set(r.id, r);
         await this.ctx.storage.put("rooms", this.liveRooms());
         this.broadcast({ type: "rooms", rooms: this.liveRooms() });
         return json({ ok: true });

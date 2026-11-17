@@ -43,6 +43,8 @@ interface RoomState {
   speed: "fast" | "normal" | "slow";
   autoNext: boolean;
   nextAt: number | null;       // arena: when the next game auto-starts
+  maxGames: number;            // arena: series length (0 = unlimited)
+  closed: boolean;             // arena: match ended - no more games
   created: number;
   updated: number;
 }
@@ -102,7 +104,12 @@ const cleanText = (s: unknown) => (typeof s === "string" ? s : "").replace(/\s+/
 
 function seatSpec(spec: unknown, claudeTag: string): Player {
   const s = String(spec ?? "");
-  if (s === "claude") return { token: claudeTag, name: claudeTag === "claude" ? "Claude" : `Claude ${claudeTag.slice(-1)}`, kind: "claude", wins: 0 };
+  if (s === "claude" || s.startsWith("claude:")) {
+    // "claude:claude-sonnet-5-5" pre-selects the model; the model Claude reports through MCP still wins
+    const m = modelInfo(s.slice(7));
+    const tag = claudeTag === "claude" ? "" : ` (${claudeTag.slice(-1)})`;
+    return { token: claudeTag, name: (m ? m.name : "Claude") + tag, kind: "claude", model: m?.id, wins: 0 };
+  }
   const level = LEVELS.includes(s.replace(/^ai:/, "")) ? s.replace(/^ai:/, "") : "medium";
   return { token: `ai-${newToken().slice(0, 8)}`, name: `AI · ${LEVEL_NAMES[level]}`, kind: "ai", level, wins: 0 };
 }
@@ -120,6 +127,7 @@ export class Room extends DurableObject<Env> {
         // rooms created before chat/arena existed
         this.s.chat ??= []; this.s.chatSeq ??= 0; this.s.host ??= null;
         this.s.speed ??= "normal"; this.s.autoNext ??= false; this.s.nextAt ??= null;
+        this.s.maxGames ??= 0; this.s.closed ??= false;
         for (const p of this.s.players as (Player & { claude?: boolean })[]) p.kind ??= p.claude ? "claude" : "human";
       }
     });
@@ -173,6 +181,10 @@ export class Room extends DurableObject<Env> {
       speed: s.speed,
       autoNext: s.autoNext,
       nextAt: s.nextAt,
+      maxGames: s.maxGames,
+      closed: s.closed,
+      paused: this.paused(),
+      canEnd: s.mode === "arena" && !s.closed && (!s.host || token === s.host),
       viewers: this.ctx.getWebSockets().length,
       players: [1, 2].map((seat) => {
         const p = this.playerAt(seat);
@@ -261,7 +273,10 @@ export class Room extends DurableObject<Env> {
         if (p.kind !== "ai") continue;
         if (Math.random() < 0.85) this.say(p.name, "ai", seatN, pick(r.winner === 0 ? BANTER.draw : r.winner === seatN ? BANTER.win : BANTER.lose));
       }
-      if (s.mode === "arena" && s.autoNext) s.nextAt = Date.now() + NEXT_DELAY[s.speed];
+      if (s.mode === "arena") {
+        if (s.maxGames && s.game + 1 >= s.maxGames) this.closeMatch();
+        else if (s.autoNext) s.nextAt = Date.now() + NEXT_DELAY[s.speed];
+      }
     } else if (player.kind === "ai") {
       const { board, heights } = fromMoves(s.moves);
       const threat = legalColumns(heights).some((c) => {
@@ -277,8 +292,27 @@ export class Room extends DurableObject<Env> {
     return null;
   }
 
+  /** Computer to move in an AI match but nobody is watching (its moves come from viewers' browsers). */
+  paused(): boolean {
+    const s = this.s!;
+    return s.mode === "arena" && !s.closed && s.winner === null && this.ready()
+      && this.playerAt(this.turn())?.kind === "ai" && this.ctx.getWebSockets().length === 0;
+  }
+
+  closeMatch() {
+    const s = this.s!;
+    if (s.closed) return;
+    s.closed = true;
+    s.nextAt = null;
+    const [a, b] = s.players;
+    const score = `${a.name} ${a.wins} - ${b.wins} ${b.name}${s.draws ? ` (${s.draws} draw${s.draws > 1 ? "s" : ""})` : ""}`;
+    const champ = a.wins === b.wins ? "It's a tie." : `${(a.wins > b.wins ? a : b).name} wins the match!`;
+    this.say("Room", "system", null, `Match over after ${s.game + 1} game${s.game ? "s" : ""}. ${score}. ${champ}`);
+  }
+
   nextGame() {
     const s = this.s!;
+    if (s.closed) return;
     s.game++;           // seats swap: the other player opens the next game
     s.moves = [];
     s.winner = null;
@@ -292,7 +326,7 @@ export class Room extends DurableObject<Env> {
   rematch(token: string): boolean {
     const s = this.s!;
     if (s.winner === null) return false;
-    if (s.mode === "arena") { this.nextGame(); return true; }       // anyone watching may start the next one
+    if (s.mode === "arena") { if (s.closed) return false; this.nextGame(); return true; } // anyone watching may start the next one
     if (this.seatOf(token) === null) return false;
     if (!s.rematch.includes(token)) s.rematch.push(token);
     // vs Claude either side can restart; friends both have to agree
@@ -303,7 +337,7 @@ export class Room extends DurableObject<Env> {
   /** Arena: ask one connected browser to compute the computer's move. */
   driveAI() {
     const s = this.s;
-    if (!s || s.winner !== null || !this.ready()) return;
+    if (!s || s.closed || s.winner !== null || !this.ready()) return;
     const p = this.playerAt(this.turn());
     if (p?.kind !== "ai") return;
     const ply = s.moves.length;
@@ -329,7 +363,7 @@ export class Room extends DurableObject<Env> {
       method: "POST",
       body: JSON.stringify({
         id: s.id, red: red.name, yellow: yellow.name, moves: s.moves.length, game: s.game + 1,
-        score: `${s.players[0].wins}-${s.players[1].wins}`, status: s.winner === null ? "live" : "finished",
+        score: `${s.players[0].wins}-${s.players[1].wins}`, status: s.closed ? "ended" : s.winner === null ? "live" : "finished",
         viewers: this.ctx.getWebSockets().length, updated: Date.now(),
       }),
     }).catch(() => {});
@@ -408,7 +442,7 @@ export class Room extends DurableObject<Env> {
       if (this.s) return json({ error: "exists" }, 409);
       const body = (await req.json()) as {
         id: string; mode: Mode; first: string; name?: string; byClaude?: boolean; auth?: string;
-        red?: string; yellow?: string; speed?: string; autoNext?: boolean; model?: string;
+        red?: string; yellow?: string; speed?: string; autoNext?: boolean; model?: string; maxGames?: number;
       };
       const mode: Mode = body.mode === "claude" || body.mode === "arena" ? body.mode : "friend";
       // `first` names who opens game 1: "me" (room creator), "them" (friend / Claude) or "random".
@@ -420,11 +454,13 @@ export class Room extends DurableObject<Env> {
         draws: 0, rematch: [], comment: "", chat: [], chatSeq: 0, host: null,
         speed: body.speed === "fast" || body.speed === "slow" ? body.speed : "normal",
         autoNext: mode === "arena" && body.autoNext !== false, nextAt: null,
+        maxGames: mode === "arena" ? Math.max(0, Math.min(50, Math.floor(Number(body.maxGames ?? 3)) || 0)) : 0, closed: false,
         created: Date.now(), updated: Date.now(),
       };
       let token: string | null = null;
       if (mode === "arena") {
-        const bothClaude = body.red === "claude" && body.yellow === "claude";
+        const isClaude = (v?: string) => v === "claude" || !!v?.startsWith("claude:");
+        const bothClaude = isClaude(body.red) && isClaude(body.yellow);
         this.s.players.push(seatSpec(body.red, bothClaude ? "claude-A" : "claude"));
         this.s.players.push(seatSpec(body.yellow, bothClaude ? "claude-B" : "claude"));
         if (!body.byClaude) { token = newToken(); this.s.host = token; }
@@ -494,7 +530,7 @@ export class Room extends DurableObject<Env> {
       if (path === "/claude/state") return json(this.view(ct));
       if (path === "/claude/wait") {
         const timeout = Math.min(Number(url.searchParams.get("timeout")) || 40, 50) * 1000;
-        const done = () => this.s!.winner !== null || (this.ready() && this.turn() === this.seatOf(ct));
+        const done = () => this.s!.closed || this.s!.winner !== null || this.paused() || (this.ready() && this.turn() === this.seatOf(ct));
         if (!done()) {
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, timeout);
@@ -535,7 +571,7 @@ export class Room extends DurableObject<Env> {
     if (!this.s || typeof raw !== "string") return;
     const att = ws.deserializeAttachment() as Attachment;
     const { token } = att;
-    let msg: { type?: string; col?: number; name?: string; e?: string; text?: string; game?: number; ply?: number; speed?: string; autoNext?: boolean };
+    let msg: { type?: string; col?: number; name?: string; e?: string; text?: string; game?: number; ply?: number; speed?: string; autoNext?: boolean; maxGames?: number };
     try { msg = JSON.parse(raw); } catch { return; }
     const s = this.s;
 
@@ -573,7 +609,16 @@ export class Room extends DurableObject<Env> {
       if (this.rematch(token)) await this.save();
       return;
     }
-    if (msg.type === "settings" && s.mode === "arena") {
+    if (msg.type === "end" && s.mode === "arena" && !s.closed && (!s.host || token === s.host)) {
+      this.closeMatch();
+      await this.save();
+      return;
+    }
+    if (msg.type === "settings" && s.mode === "arena" && !s.closed) {
+      if (typeof msg.maxGames === "number") {
+        s.maxGames = Math.max(0, Math.min(50, Math.floor(msg.maxGames)));
+        if (s.maxGames && s.winner !== null && s.game + 1 >= s.maxGames) this.closeMatch();
+      }
       if (msg.speed === "fast" || msg.speed === "normal" || msg.speed === "slow") s.speed = msg.speed;
       if (typeof msg.autoNext === "boolean") {
         s.autoNext = msg.autoNext;
@@ -607,7 +652,7 @@ export class Room extends DurableObject<Env> {
   async alarm() {
     const s = this.s;
     if (!s) return;
-    if (s.nextAt && Date.now() >= s.nextAt - 50 && s.winner !== null) {
+    if (s.nextAt && Date.now() >= s.nextAt - 50 && s.winner !== null && !s.closed) {
       this.nextGame();
       await this.save();
       return;

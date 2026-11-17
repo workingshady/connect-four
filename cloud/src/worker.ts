@@ -17,11 +17,11 @@ export default {
     if (path === "/mcp" || path === "/mcp/") return handleMcp(req, env);
 
     if (path === "/api/rooms" && req.method === "POST") {
-      const body = (await req.json().catch(() => ({}))) as { mode?: string; first?: string; name?: string; red?: string; yellow?: string; speed?: string; autoNext?: boolean };
+      const body = (await req.json().catch(() => ({}))) as { mode?: string; first?: string; name?: string; red?: string; yellow?: string; speed?: string; autoNext?: boolean; maxGames?: number };
       const mode = body.mode === "claude" || body.mode === "arena" ? body.mode : "friend";
       const room = await createRoom(env, {
         mode, first: body.first, name: body.name, auth: bearer(req) || undefined,
-        red: body.red, yellow: body.yellow, speed: body.speed, autoNext: body.autoNext,
+        red: body.red, yellow: body.yellow, speed: body.speed, autoNext: body.autoNext, maxGames: body.maxGames,
       });
       return Response.json(room);
     }
