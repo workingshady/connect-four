@@ -614,13 +614,28 @@ function viewRoom(code) {
   app.innerHTML = `<div class="game"><div class="game-main">
       <div id="pbar"></div><div class="status" id="status"><span class="spinner"></span> Connecting…</div>
       <div id="board-slot"></div><div class="kbd-hint" id="keys">Keys: 1-7 drop a piece</div></div>
-    <aside class="side"><div id="side"></div>
-      <div class="card panel"><h3>Room chat</h3><div id="chat-slot"></div></div></aside></div>`;
+    <aside class="side room-side"><div class="card side-panel">
+      <div class="side-head"><div class="seg" id="side-tabs">
+        <button data-t="chat" aria-pressed="true">💬 Chat <b class="unread" id="unread" hidden></b></button>
+        <button data-t="room" aria-pressed="false">⚙ Room</button></div>
+        <span class="muted" id="viewers"></span></div>
+      <div class="side-body" id="tab-chat"><div id="react"></div><div id="chat-slot"></div></div>
+      <div class="side-body scroll" id="tab-room" hidden><div id="side"></div></div>
+    </div></aside></div>`;
   const board = createBoard({ onColumn: (c) => send({ type: "move", col: c }) });
   $("#board-slot").append(board.el);
   const myName = () => auth?.name || ls.get("c4.name", "") || "";
   const chat = chatBox({ onSend: (text) => send({ type: "chat", text }), meName: () => state?.players.find((p) => p.seat === state.you)?.name || `${myName()} 👀` });
   $("#chat-slot").append(chat.el);
+  let tab = "chat", unread = 0, tabChosen = false;
+  const showTab = (t, byUser = false) => {
+    tab = t; if (byUser) tabChosen = true;
+    $$("#side-tabs button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.t === t));
+    $("#tab-chat").hidden = t !== "chat"; $("#tab-room").hidden = t !== "room";
+    if (t === "chat") { unread = 0; $("#unread").hidden = true; }
+  };
+  $$("#side-tabs button").forEach((b) => (b.onclick = () => showTab(b.dataset.t, true)));
+  const bumpUnread = () => { if (tab !== "chat") { unread++; $("#unread").textContent = unread; $("#unread").hidden = false; } };
 
   function send(m) { if (ws?.readyState === 1) ws.send(JSON.stringify(m)); }
 
@@ -646,7 +661,7 @@ function viewRoom(code) {
       if (m.type === "welcome" && m.token) { token = m.token; ls.set(`c4.room.${code}`, token); }
       else if (m.type === "state") paint(m.state);
       else if (m.type === "chat_history") { chatHistory = m.chat; chat.set(m.chat); }
-      else if (m.type === "chat") { chat.add(m.msg); if (m.msg.kind !== "system") sfx.pop(); }
+      else if (m.type === "chat") { chat.add(m.msg); if (m.msg.kind !== "system") { sfx.pop(); bumpUnread(); } }
       else if (m.type === "compute") compute(m);
       else if (m.type === "emoji") { board.emoji(m.e); sfx.pop(); }
       else if (m.type === "error") toast(m.message);
@@ -744,12 +759,13 @@ function viewRoom(code) {
     // side panel
     const side = $("#side");
     side.innerHTML = "";
-    if (me === null && s.ready) side.append(h(`<div class="banner" style="margin-bottom:14px">👀 Watching${s.viewers > 1 ? ` with ${s.viewers - 1} other${s.viewers > 2 ? "s" : ""}` : ""}</div>`));
+    $("#viewers").textContent = `👀 ${s.viewers} here${me === null && s.ready ? " · watching" : ""}`;
     const claudes = s.players.filter((p) => p.kind === "claude");
+    // open the Room tab first when there is setup to do (invite a friend / start Claude)
+    if (!tabChosen) showTab((!s.ready && s.mode === "friend") || (claudes.length && s.moves.length === 0) ? "room" : "chat");
     if (claudes.length) {
       const two = claudes.length === 2;
-      const box = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>✨ Claude ${two ? "players" : ""}</h3>
-        ${s.comment ? `<div class="bubble claude"><span class="who">Latest</span>${esc(s.comment)}</div>` : ""}
+      const box = h(`<div class="panel stack sect"><h3>✨ Claude ${two ? "players" : ""}</h3>
         <p style="margin:0" class="muted">Paste into ${two ? "two separate Claude chats" : "your Claude chat"} (Connect Four MCP connected):</p></div>`);
       for (const c of claudes) {
         const prompt = two
@@ -764,7 +780,7 @@ function viewRoom(code) {
       side.append(box);
     }
     if (arena) {
-      const set = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>Match settings</h3>
+      const set = h(`<div class="panel stack sect"><h3>Match settings</h3>
         <div class="seg" id="spd">${["fast", "normal", "slow"].map((v) => `<button data-v="${v}" aria-pressed="${s.speed === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join("")}</div>
         <label class="switch"><input type="checkbox" id="auto" ${s.autoNext ? "checked" : ""}/> Auto-play next game</label>
         <div class="copy-box"><code>${esc(link)}</code><button class="btn small" id="cl">Copy</button></div>
@@ -774,7 +790,7 @@ function viewRoom(code) {
       $("#cl", set).onclick = () => copy(link, "Link copied");
       side.append(set);
     } else if (s.mode === "friend") {
-      const share = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>${s.ready ? "Room" : "Invite your friend"}</h3>
+      const share = h(`<div class="panel stack sect"><h3>${s.ready ? "Room" : "Invite your friend"}</h3>
         <div class="share-code">${esc(code)}</div>
         <div class="copy-box"><code>${esc(link)}</code><button class="btn small" id="cl">Copy</button></div>
         ${navigator.share ? '<button class="btn ghost" id="sh">Share link…</button>' : ""}</div>`);
@@ -782,13 +798,14 @@ function viewRoom(code) {
       $("#sh", share)?.addEventListener("click", () => navigator.share({ title: "Connect Four", text: "Play Connect Four with me!", url: link }).catch(() => {}));
       side.append(share);
     }
-    if (me !== null && !arena) {
-      const em = h(`<div class="card panel" style="margin-bottom:14px"><h3>React</h3><div class="emojis">${["👍", "😂", "😮", "😡", "🔥", "🎉", "🤔", "👋"].map((e) => `<button>${e}</button>`).join("")}</div></div>`);
+    const react = $("#react");
+    if (me !== null && !arena && !react.childElementCount) {
+      const em = h(`<div class="emojis compact">${["👍", "😂", "😮", "😡", "🔥", "🎉", "🤔", "👋"].map((e) => `<button title="React">${e}</button>`).join("")}</div>`);
       $$("button", em).forEach((b) => (b.onclick = () => send({ type: "emoji", e: b.textContent })));
-      side.append(em);
+      react.append(em);
     }
     if (me !== null && !auth) {
-      const n = h(`<div class="note" style="margin-bottom:14px">Playing as a guest. <a href="#">Sign in</a> to count this room's wins on the leaderboard.</div>`);
+      const n = h(`<div class="note sect">Playing as a guest. <a href="#">Sign in</a> to count this room's wins on the leaderboard.</div>`);
       $("a", n).onclick = (e) => { e.preventDefault(); openAuth(); };
       side.append(n);
     }

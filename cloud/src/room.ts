@@ -57,15 +57,39 @@ const LEVEL_NAMES: Record<string, string> = {
 };
 const NEXT_DELAY = { fast: 4000, normal: 7000, slow: 10000 };
 
-// Short lines the computer players drop into the chat, so a match feels like real opponents.
+// Trash talk the computer players drop into the chat: sarcastic, a bit dark, aimed at the moves - never the person.
 const BANTER = {
-  hello: ["Good luck! 🍀", "Let's play.", "Ready when you are.", "May the best player win."],
-  block: ["Blocked! 🧱", "Not so fast.", "I saw that coming 👀", "Nice try."],
-  threat: ["Your move… 😏", "Watch out.", "Something's brewing.", "Hmm, interesting."],
-  idle: ["Hmm…", "Thinking…", "Okay.", "Bold move.", "🤔", "Let's see."],
-  win: ["Four in a row! 🎉", "GG! 🏆", "That's game.", "Got you!"],
-  lose: ["GG, well played 👏", "You got me.", "Rematch?", "Nicely done."],
-  draw: ["A draw - well fought.", "Nobody wins this time 🤝"],
+  hello: [
+    "Let's get this funeral started. ⚰️", "I've pre-written your eulogy. It's short.", "Good luck. You'll need all of it.",
+    "Ah, fresh pieces for the graveyard. 🪦", "Relax. It'll be quick. Mostly painless.", "I'd say may the best player win, but we both know.",
+  ],
+  block: [
+    "Blocked. Did you really think that would work?", "Denied. 🧱", "Nice try. Truly. Adorable.", "I saw that one from orbit. 🛰️",
+    "That threat just died. Moment of silence. …okay, done.", "Not today.", "Cute plan. I've buried better ones.",
+  ],
+  threat: [
+    "Tick tock… ⏳", "I'd start writing your will.", "Your move. Choose your last words carefully.", "Something smells like defeat. 👃",
+    "Don't panic. Actually, panic a little.", "I can already hear the sad violin. 🎻",
+  ],
+  idle: [
+    "Hmm. Bold. Wrong, but bold.", "Interesting choice. By which I mean bad.", "I've seen better moves from a toaster. 🍞",
+    "Fascinating. Truly. 🥱", "Are you playing with your eyes closed?", "Every move you make brings me joy. And you closer to the grave.",
+    "That column has feelings too, you know.", "My grandmother plays faster. She's a pocket calculator.",
+  ],
+  win: [
+    "Four in a row. Time of death: now. ⚰️", "GG. Well, G for me.", "Another one for the graveyard. 🪦", "Flawless. As expected.",
+    "Don't cry. Actually, go ahead, it's healthy.", "Rest in pieces. 🕯️",
+  ],
+  lose: [
+    "I demand a recount.", "Fine. Enjoy it while it lasts.", "I let you win. Obviously. 🙄", "This never happened. 🫥",
+    "Rematch. Now. I'm not angry. I'm just going to destroy you.", "Bury me with my dignity. Oh wait, that's gone too.",
+  ],
+  draw: ["A draw. We both lose. How poetic. 🥀", "Mutually assured boredom. 🤝", "Nobody died. Disappointing."],
+  // when people talk in the room chat
+  retort: [
+    "Bold words from the cheap seats. 🍿", "Noted. Ignored.", "Spectators should be seen, not heard. 👀", "Says the one not playing.",
+    "I'd answer, but I'm busy winning.", "Typing won't save anyone here.", "Your opinion has been filed under 'trash'. 🗑️",
+  ],
 };
 const pick = <T>(a: T[]) => a[Math.floor(Math.random() * a.length)];
 
@@ -248,7 +272,7 @@ export class Room extends DurableObject<Env> {
       if (s.moves.length <= 2) this.say(player.name, "ai", seat, pick(BANTER.hello));
       else if (blocked && Math.random() < 0.7) this.say(player.name, "ai", seat, pick(BANTER.block));
       else if (threat && Math.random() < 0.5) this.say(player.name, "ai", seat, pick(BANTER.threat));
-      else if (Math.random() < 0.08) this.say(player.name, "ai", seat, pick(BANTER.idle));
+      else if (Math.random() < 0.18) this.say(player.name, "ai", seat, pick(BANTER.idle));
     }
     return null;
   }
@@ -523,6 +547,12 @@ export class Room extends DurableObject<Env> {
       ws.serializeAttachment({ ...att, lastChat: now });
       const p = s.players.find((p) => p.token === token);
       this.say(p ? p.name : `${att.name} 👀`, p ? "human" : "spectator", p ? this.seatOf(token) : null, String(msg.text ?? ""));
+      // computer players sometimes fire back
+      const bots = s.players.filter((q) => q.kind === "ai" && q.token !== token);
+      if (bots.length && Math.random() < 0.35) {
+        const bot = pick(bots);
+        this.say(bot.name, "ai", this.seatOf(bot.token), pick(BANTER.retort));
+      }
       await this.ctx.storage.put("s", s);
       return;
     }

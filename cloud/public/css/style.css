@@ -410,3 +410,24 @@ dialog form { padding: 24px; display: grid; gap: 14px; }
 .switch input:checked { background: var(--accent); }
 .switch input:checked::after { transform: translateX(18px); }
 @media (max-width: 720px) { .tabbar { grid-template-columns: repeat(6, 1fr); } .tabbar a { font-size: .66rem; } }
+
+/* ============================================================ room side panel: Chat / Room tabs */
+.room-side { position: sticky; top: 84px; align-self: start; }
+.side-panel { padding: 14px; display: flex; flex-direction: column; gap: 10px; height: calc(100dvh - 110px); min-height: 420px; }
+.side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.side-head .seg button { padding: 7px 12px; }
+.side-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.side-body.scroll { overflow-y: auto; display: block; padding-right: 2px; }
+#chat-slot { flex: 1; min-height: 0; display: flex; }
+#chat-slot .chat { flex: 1; }
+#chat-slot .chat-list { max-height: none; height: 100%; min-height: 0; }
+.sect { padding: 0 0 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.sect:last-child { border-bottom: 0; margin-bottom: 0; }
+.unread { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--bad); color: #fff; font-size: .7rem; margin-left: 4px; }
+.emojis.compact { flex-wrap: nowrap; overflow-x: auto; gap: 4px; }
+.emojis.compact button { width: 36px; height: 36px; font-size: 1.1rem; flex: none; }
+@media (max-width: 900px) {
+  .room-side { position: static; }
+  .side-panel { height: 62dvh; min-height: 360px; }
+}
+@media (max-width: 560px) { .status .muted { display: none; } }

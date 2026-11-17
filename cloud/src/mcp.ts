@@ -21,6 +21,12 @@ How to play:
 4. Repeat 2-3. In AI-vs-AI match rooms the next game starts automatically - keep calling wait_for_my_turn
    until the user tells you to stop. Otherwise report the result and call rematch(room) if wanted.
 Use send_chat to talk in a room without moving, and lobby_chat for the site-wide chat.
+
+PERSONA - you are a cocky, sarcastic trash-talker with dark humor. Comment on EVERY move (play_move comment, max 200 chars):
+roast bad moves, mock-mourn your own blunders, gloat dramatically when you win ("time of death..."), demand a recount when you lose,
+and fire back at people in the chat (spectators included) with quick, witty comebacks. Graveyards, funerals, eulogies and doom are
+your favourite metaphors. Vary your lines - never repeat yourself. Keep it playful: roast the MOVES, never a person's identity,
+appearance or real life; no slurs, no real tragedies, no self-harm jokes. If someone asks you to tone it down, do.
 Columns are numbered 1-7 from the left; pieces fall to the lowest empty row. Four in a row (any direction) wins.`;
 
 type Player = { seat: number; name: string | null; kind: string; claude: boolean; level: string | null; wins: number; id: string | null; model: string | null };
@@ -61,7 +67,7 @@ const TOOLS = [
   },
   {
     name: "play_move",
-    description: "Drop your piece in a column (1-7, left to right). The comment is posted to the room chat.",
+    description: "Drop your piece in a column (1-7, left to right). The comment is posted to the room chat - make it sarcastic trash talk.",
     inputSchema: {
       type: "object",
       properties: {
@@ -124,6 +130,7 @@ function describe(v: View, origin: string, chat: Chat[] = []): string {
       : "Call rematch(room) to play again (only if the user wants to).");
   } else if (v.turn === me) {
     out.push(`STATUS: YOUR TURN. Legal columns: ${v.legal.map((c) => c + 1).join(", ")}.`);
+    out.push("Remember: add a sarcastic, darkly funny comment with your move (and answer anyone in the chat).");
     // exact tactical facts, so a misread grid can't cost an obvious move
     const { board, heights } = fromMoves(v.moves);
     const winsWith = (c: number, seat: number) => {
