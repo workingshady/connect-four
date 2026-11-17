@@ -34,6 +34,20 @@ export default {
       return stub.fetch(`https://room/state${url.search}`);
     }
 
+    // ---- admin: stop games (secret ADMIN_KEY, header x-admin-key)
+    if (path === "/api/admin/stop" && req.method === "POST") {
+      if (!env.ADMIN_KEY || req.headers.get("x-admin-key") !== env.ADMIN_KEY) return Response.json({ error: "Forbidden" }, { status: 403 });
+      const body = (await req.json().catch(() => ({}))) as { rooms?: string[] };
+      const lobby = env.LOBBY.get(env.LOBBY.idFromName("global"));
+      const live = ((await (await lobby.fetch("https://lobby/history?n=0")).json()) as { rooms: { id: string }[] }).rooms.map((r) => r.id);
+      const ids = [...new Set([...live, ...(body.rooms ?? []).map((r) => r.toUpperCase())])];
+      const results = await Promise.all(ids.map(async (id) => {
+        const res = await roomStub(env, id).fetch("https://room/admin/close", { method: "POST" });
+        return res.ok ? await res.json() : { id, error: res.status };
+      }));
+      return Response.json({ stopped: results });
+    }
+
     // ---- general chat + live matches
     if (path === "/api/lobby/ws" || path === "/api/lobby") {
       const lobby = env.LOBBY.get(env.LOBBY.idFromName("global"));

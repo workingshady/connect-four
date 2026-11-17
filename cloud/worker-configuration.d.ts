@@ -5,7 +5,8 @@ interface __BaseEnv_Env {
 	ASSETS: Fetcher;
 	ROOMS: DurableObjectNamespace<import("./src/worker").Room>;
 	LEADERBOARD: DurableObjectNamespace<import("./src/worker").Leaderboard>;
-	LOBBY: DurableObjectNamespace<import("./src/worker").Lobby>;
+	ADMIN_KEY?: string;
+		LOBBY: DurableObjectNamespace<import("./src/worker").Lobby>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

@@ -241,6 +241,7 @@ export class Room extends DurableObject<Env> {
 
   move(token: string, col: number, comment?: string): string | null {
     const s = this.s!;
+    if (s.closed) return "This room has been closed.";
     if (!this.ready()) return "Waiting for the second player to join.";
     if (s.winner !== null) return "The game is over. Ask for a rematch to play again.";
     const seat = this.seatOf(token);
@@ -518,6 +519,13 @@ export class Room extends DurableObject<Env> {
 
     if (path === "/state") return json(this.view(url.searchParams.get("token")));
     if (path === "/chat") return json(this.s.chat.slice(-20));
+    if (path === "/admin/close" && req.method === "POST") {
+      // admin stop (any room type): no more moves, Claude is told MATCH ENDED
+      const was = this.s.closed;
+      this.closeMatch();
+      await this.save();
+      return json({ id: this.s.id, mode: this.s.mode, alreadyClosed: was });
+    }
 
     // ---- Claude (MCP) endpoints; ?player=A|B picks the Claude when two Claudes play
     if (path.startsWith("/claude/")) {
