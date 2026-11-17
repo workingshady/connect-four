@@ -566,6 +566,8 @@ export class Room extends DurableObject<Env> {
         return json(this.view(ct));
       }
       if (path === "/claude/rematch" && req.method === "POST") {
+        // arena: the next game starts by itself - just return the current one
+        if (this.s.mode === "arena" && this.s.winner === null) return json(this.view(ct));
         if (!this.rematch(ct)) return json({ error: "The current game is still in progress." }, 400);
         await this.save();
         return json(this.view(ct));
