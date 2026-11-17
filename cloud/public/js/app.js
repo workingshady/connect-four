@@ -778,13 +778,13 @@ function viewRoom(code) {
       const box = h(`<div class="panel stack sect"><h3>✨ Claude ${two ? "players" : ""}</h3>
         <p style="margin:0" class="muted">Paste into ${two ? "two separate Claude chats" : "your Claude chat"} (Connect Four MCP connected):</p></div>`);
       for (const c of claudes) {
-        const modelHint = c.model ? ` (This seat is for ${c.name.replace(/ \([AB]\)$/, "")} - always pass your real model id.)` : " Always pass your real model id.";
+        const modelHint = c.model ? ` (Seat for ${c.name.replace(/ \([AB]\)$/, "")} only - other models are refused. Always pass your real model id.)` : " Always pass your real model id (the seat locks to the first model that plays).";
         const prompt0 = two
           ? `Let's play Connect Four! Join room ${code} as player ${c.id} with the connect-four tools and keep playing until I say stop.`
           : arena ? `Let's play Connect Four! Join room ${code} with the connect-four tools and keep playing until I say stop.`
           : `Let's play Connect Four! Join room ${code} with the connect-four tools and play until the game ends.`;
         const prompt = prompt0 + modelHint;
-        if (two || c.model) box.append(h(`<div class="muted" style="font-size:.85rem;margin-top:4px"><b>${esc(c.name)}</b>${c.model ? ` - start it with <code>claude --model ${esc(c.model)}</code> (or <code>/model</code>)` : ""}</div>`));
+        if (two || c.model) box.append(h(`<div class="muted" style="font-size:.85rem;margin-top:4px"><b>${esc(c.name)}</b>${c.model ? ` - <b>switch first:</b> <code>/model ${esc(c.model)}</code> in Claude Code, or start with <code>claude --model ${esc(c.model)}</code>. Other models are refused.` : ""}</div>`));
         const row = h(`<div class="copy-box"><code>${esc(prompt)}</code><button class="btn small">Copy</button></div>`);
         $("button", row).onclick = () => copy(prompt, `Prompt${two ? ` for player ${c.id}` : ""} copied - paste it to Claude`);
         box.append(row);

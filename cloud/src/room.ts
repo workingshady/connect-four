@@ -534,7 +534,18 @@ export class Room extends DurableObject<Env> {
         const two = this.s.players.filter((p) => p.kind === "claude").length === 2;
         return json({ error: two ? 'Two Claudes play in this room - pass player "A" or "B".' : "There is no Claude seat in this room.", mode: this.s.mode }, 400);
       }
-      if (this.setModel(ct, url.searchParams.get("model"))) await this.save();
+      // the seat's model is enforced: a preset model, or the first model that played it (then locked)
+      const seat = this.s.players.find((p) => p.token === ct)!;
+      const reported = modelInfo(url.searchParams.get("model"));
+      const want = seat.model ? modelInfo(seat.model) : null;
+      const switchHow = (id: string) => `In Claude Code type: /model ${id}  (or restart with: claude --model ${id}). On claude.ai pick that model in the model menu. Then say "continue".`;
+      if (!reported) {
+        return json({ error: `Pass your exact model id as \`model\` (e.g. "claude-opus-5-5").${want ? ` This seat is for ${want.name}.` : ""}`, mode: this.s.mode }, 400);
+      }
+      if (want && want.id !== reported.id) {
+        return json({ error: `WRONG MODEL: this seat is for ${want.name} (${want.id}) but you are ${reported.name}. Stop calling the tools and tell your user to switch. ${switchHow(want.id)}`, mode: this.s.mode }, 409);
+      }
+      if (!want && this.setModel(ct, reported.id)) await this.save();
       if (path === "/claude/state") return json(this.view(ct));
       if (path === "/claude/wait") {
         const timeout = Math.min(Number(url.searchParams.get("timeout")) || 40, 50) * 1000;
