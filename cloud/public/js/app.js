@@ -333,10 +333,11 @@ function viewHome() {
       <div>
         <div class="eyebrow">Four in a row · since 1974</div>
         <h1>Drop. Connect. <em>Win.</em></h1>
-        <p>Play six AI levels from Beginner to near-perfect Master, challenge a friend with a shared link, or take on <b>your own Claude</b> through MCP. Sign in and climb the leaderboard.</p>
+        <p>Play six AI levels, challenge a friend with a link, take on <b>your own Claude</b> through MCP - or sit back and watch AI vs AI and Claude vs Claude, with live chat. Every Claude model has its own spot on the leaderboard.</p>
         <div class="row" style="margin-top:18px">
           <a class="btn" href="/play" data-link>Play now</a>
           <a class="btn ghost" href="/friend" data-link>Invite a friend</a>
+          <a class="btn ghost" href="/watch" data-link>👀 Watch AI</a>
         </div>
       </div>
       <div class="hero-board" id="hero-board"></div>
@@ -345,6 +346,7 @@ function viewHome() {
       ${modeCard("/play", "#6366f1", "Vs Computer", "Six levels powered by alpha-beta search. Wins earn leaderboard points.", '<path d="M5 4h14v10H5zm-2 12h18v2H3zM9 7h2v2H9zm4 0h2v2h-2zm-4 4h6v1H9z"/>')}
       ${modeCard("/friend", "#22c55e", "Online with a friend", "Create a room, send the link, play live from any device.", '<path d="M8 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm8 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 20a6 6 0 0 1 12 0zm12 0a5 5 0 0 1 8 0z"/>')}
       ${modeCard("/claude", "#d97757", "Vs your Claude", "Connect the MCP server and let Claude play you, with table talk.", '<path d="M12 2 14 9l7 3-7 3-2 7-2-7-7-3 7-3z"/>')}
+      ${modeCard("/watch", "#a855f7", "Watch AI vs AI", "Master vs Expert, Claude vs the computer, or Opus vs Sonnet - with live chat.", '<path d="M12 5C6 5 2 12 2 12s4 7 10 7 10-7 10-7-4-7-10-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/>')}
       ${modeCard("/play/pvp", "#eab308", "Pass & play", "Two players, one screen. Perfect for the couch.", '<path d="M4 6h16v10H4zm-1 12h18v2H3z"/>')}
     </section>
     <section class="card" style="margin-top:24px">
@@ -569,61 +571,121 @@ function viewFriend() {
   };
 }
 
+/* ---------------- chat box (rooms + lobby) */
+function chatBox({ onSend, tall = false, placeholder = "Say something…", meName = () => null }) {
+  const el = h(`<div class="chat ${tall ? "tall" : ""}"><div class="chat-list" aria-live="polite"></div>
+    <form><input class="input" maxlength="280" placeholder="${esc(placeholder)}" aria-label="Chat message" /><button class="btn small">Send</button></form></div>`);
+  const list = $(".chat-list", el), input = $("input", el);
+  const fmt = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const add = (m) => {
+    const icon = m.kind === "claude" ? "✨ " : m.kind === "ai" ? "🤖 " : "";
+    const mine = meName() && m.name === meName() ? " me" : "";
+    const row = m.kind === "system"
+      ? h(`<div class="msg system">${esc(m.text)}</div>`)
+      : h(`<div class="msg ${esc(m.kind)}${mine}">${m.seat ? `<span class="seat s${m.seat}"></span>` : ""}<span class="n">${icon}${esc(m.name)}</span>${esc(m.text)}<span class="t">${fmt(m.at)}</span></div>`);
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    list.append(row);
+    while (list.children.length > 150) list.firstChild.remove();
+    if (atBottom || mine) list.scrollTop = list.scrollHeight;
+  };
+  $("form", el).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    onSend(text);
+    input.value = "";
+  });
+  return {
+    el,
+    add,
+    set(msgs) { list.innerHTML = ""; msgs.forEach(add); list.scrollTop = list.scrollHeight; },
+  };
+}
+const kindBadge = (p) => (p.kind === "claude" ? '<span class="badge claude">✨ Claude</span>' : p.kind === "ai" ? '<span class="badge ai">🤖 AI</span>' : "");
+const SPEED_MS = { fast: [250, 500], normal: [900, 2200], slow: [2200, 4200] };
+
+/* ---------------- rooms: friend, Claude, AI-vs-AI match */
 function viewRoom(code) {
   code = code.toUpperCase();
   let token = ls.get(`c4.room.${code}`);
-  let ws, state = null, disposed = false, retry = 0, lastMoves = -1, pingT;
+  let ws, state = null, disposed = false, retry = 0, lastMoves = -1, pingT, countdownT, aiWorker = null, chatHistory = [];
   const link = `${ORIGIN}/r/${code}`;
-
-  // new visitor without a name: ask first (so the friend sees who joined)
-  if (!token && !auth && !ls.get("c4.name")) {
-    app.innerHTML = `<div class="card stack" style="max-width:460px;margin:30px auto">
-      <div class="eyebrow">Room ${esc(code)}</div><h2>Join the game</h2>
-      <div class="field"><label for="jn">Your name</label><input class="input" id="jn" maxlength="20" placeholder="Your name" /></div>
-      <div class="row"><button class="btn" id="jgo">Join</button><button class="btn ghost" id="jsign">Sign in instead</button></div></div>`;
-    $("#jn").focus();
-    const go = () => { ls.set("c4.name", $("#jn").value.trim() || "Guest"); render(); };
-    $("#jgo").onclick = go;
-    $("#jn").addEventListener("keydown", (e) => e.key === "Enter" && go());
-    $("#jsign").onclick = () => openAuth("Sign in so this game counts on the leaderboard.");
-    return;
-  }
 
   app.innerHTML = `<div class="game"><div class="game-main">
       <div id="pbar"></div><div class="status" id="status"><span class="spinner"></span> Connecting…</div>
-      <div id="board-slot"></div><div class="kbd-hint">Keys: 1-7 drop a piece</div></div>
-    <aside class="side" id="side"></aside></div>`;
+      <div id="board-slot"></div><div class="kbd-hint" id="keys">Keys: 1-7 drop a piece</div></div>
+    <aside class="side"><div id="side"></div>
+      <div class="card panel"><h3>Room chat</h3><div id="chat-slot"></div></div></aside></div>`;
   const board = createBoard({ onColumn: (c) => send({ type: "move", col: c }) });
   $("#board-slot").append(board.el);
+  const myName = () => auth?.name || ls.get("c4.name", "") || "";
+  const chat = chatBox({ onSend: (text) => send({ type: "chat", text }), meName: () => state?.players.find((p) => p.seat === state.you)?.name || `${myName()} 👀` });
+  $("#chat-slot").append(chat.el);
 
   function send(m) { if (ws?.readyState === 1) ws.send(JSON.stringify(m)); }
+
+  // computer moves in AI matches are computed here (in a Web Worker) when the room asks us to
+  async function compute(m) {
+    aiWorker ??= new Worker("/js/ai-worker.js", { type: "module" });
+    const t0 = performance.now();
+    const col = await new Promise((res) => {
+      aiWorker.onmessage = (e) => res(e.data.col);
+      aiWorker.postMessage({ id: 1, moves: m.moves, level: m.level });
+    });
+    const [lo, hi] = SPEED_MS[m.speed] || SPEED_MS.normal;
+    await sleep(Math.max(0, lo + Math.random() * (hi - lo) - (performance.now() - t0)));
+    if (!disposed) send({ type: "ai_move", game: m.game, ply: m.ply, col });
+  }
+
   function connect() {
-    const q = new URLSearchParams({ token: token || "", name: auth?.name || ls.get("c4.name", "") || "", auth: auth?.token || "" });
+    const q = new URLSearchParams({ token: token || "", name: myName(), auth: auth?.token || "" });
     ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/rooms/${code}/ws?${q}`);
     ws.onopen = () => { retry = 0; };
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       if (m.type === "welcome" && m.token) { token = m.token; ls.set(`c4.room.${code}`, token); }
       else if (m.type === "state") paint(m.state);
+      else if (m.type === "chat_history") { chatHistory = m.chat; chat.set(m.chat); }
+      else if (m.type === "chat") { chat.add(m.msg); if (m.msg.kind !== "system") sfx.pop(); }
+      else if (m.type === "compute") compute(m);
       else if (m.type === "emoji") { board.emoji(m.e); sfx.pop(); }
       else if (m.type === "error") toast(m.message);
     };
-    ws.onclose = (e) => {
+    ws.onclose = () => {
       if (disposed) return;
-      if (e.code === 1006 && retry === 0 && !state) { /* first attempt failed - maybe 404 */ }
       $("#status").innerHTML = '<span class="spinner"></span> Reconnecting…';
       setTimeout(connect, Math.min(8000, 500 * 2 ** retry++));
     };
   }
-  fetch(`/api/rooms/${code}`).then((r) => {
-    if (r.status === 404) {
-      app.innerHTML = `<div class="card stack" style="max-width:480px;margin:30px auto;text-align:center"><h2>Room not found</h2>
-        <p>Room <b class="mono">${esc(code)}</b> doesn't exist or expired (rooms last a week after the last move).</p>
-        <div class="row" style="justify-content:center"><a class="btn" href="/friend" data-link>Create a new room</a></div></div>`;
-      disposed = true;
-    } else connect();
-  });
-  pingT = setInterval(() => send({ type: "ping" }), 30000);
+
+  function start() {
+    fetch(`/api/rooms/${code}?token=${encodeURIComponent(token || "")}`).then(async (r) => {
+      if (r.status === 404) {
+        app.innerHTML = `<div class="card stack" style="max-width:480px;margin:30px auto;text-align:center"><h2>Room not found</h2>
+          <p>Room <b class="mono">${esc(code)}</b> doesn't exist or expired (rooms last a week after the last move).</p>
+          <div class="row" style="justify-content:center"><a class="btn" href="/watch" data-link>Watch a match</a><a class="btn ghost" href="/friend" data-link>New room</a></div></div>`;
+        disposed = true;
+        return;
+      }
+      const s = await r.json();
+      // a new visitor who will take a seat picks a name first (so the other player sees who joined)
+      const willJoin = s.mode !== "arena" && s.you === null && !s.ready;
+      if (willJoin && !auth && !ls.get("c4.name")) {
+        const card = h(`<div class="result"><div class="card stack" style="text-align:left">
+          <div class="eyebrow">Room ${esc(code)}</div><h2>Join the game</h2>
+          <div class="field"><label for="jn">Your name</label><input class="input" id="jn" maxlength="20" placeholder="Your name" /></div>
+          <div class="row"><button class="btn" id="jgo">Join</button><button class="btn ghost" id="jsign">Sign in</button></div></div></div>`);
+        board.overlay(card);
+        $("#jn", card).focus();
+        const go = () => { ls.set("c4.name", $("#jn", card).value.trim() || "Guest"); board.overlay(null); connect(); };
+        $("#jgo", card).onclick = go;
+        $("#jn", card).addEventListener("keydown", (e) => e.key === "Enter" && go());
+        $("#jsign", card).onclick = () => openAuth("Sign in so this game counts on the leaderboard.");
+      } else connect();
+    });
+  }
+  start();
+  pingT = setInterval(() => send({ type: "ping" }), 10000);
 
   function paint(s) {
     const animate = lastMoves >= 0 && s.moves.length === lastMoves + 1;
@@ -631,85 +693,215 @@ function viewRoom(code) {
     const prevWinner = state?.winner ?? null;
     state = s;
     const me = s.you;
-    const isClaude = s.mode === "claude";
+    const arena = s.mode === "arena";
     const P = s.players.map((p) => ({
       seat: p.seat,
       name: p.name ? (p.seat === me ? `${p.name} (you)` : p.name) : "Waiting…",
-      sub: `${p.wins} win${p.wins === 1 ? "" : "s"}${p.claude ? " · AI" : ""}`,
+      sub: `${p.wins} win${p.wins === 1 ? "" : "s"}${p.kind === "claude" ? (p.model ? ` · ${p.model}` : " · Claude") : p.kind === "ai" ? " · computer" : ""}`,
       online: p.name ? p.online : false,
     }));
-    const opp = s.players.find((p) => p.seat !== me) || s.players[1];
     $("#pbar").innerHTML = playersBar(P[0], P[1], s.winner === null && s.ready ? s.turn : 0, `${s.players[0].wins} : ${s.players[1].wins}`);
     board.set(s.moves, { animate, line: s.line });
     const myTurn = s.ready && s.winner === null && me === s.turn;
     board.lock(!myTurn, s.turn);
+    $("#keys").hidden = me === null;
 
     // status line
+    const mover = s.players.find((p) => p.seat === s.turn);
     let st = "";
-    if (!s.ready) st = isClaude ? "Waiting for you to join…" : '<span class="spinner"></span> Waiting for your friend to join…';
-    else if (s.winner !== null) st = "";
-    else if (myTurn) st = "Your turn";
-    else if (me === null) st = `Watching · ${esc(s.players.find((p) => p.seat === s.turn)?.name)} to move`;
-    else if (opp?.claude) st = '<span class="spinner"></span> Claude is thinking… <span class="muted">(keep your Claude chat running)</span>';
-    else st = `<span class="spinner"></span> Waiting for ${esc(opp?.name || "your friend")}…`;
+    if (!s.ready) st = s.mode === "claude" ? "Waiting for you to join…" : '<span class="spinner"></span> Waiting for your friend to join…';
+    else if (s.winner !== null) {
+      st = s.nextAt ? `Next game in <b id="cd">${Math.max(0, Math.ceil((s.nextAt - Date.now()) / 1000))}</b>s…` : "";
+    } else if (myTurn) st = "Your turn";
+    else if (mover?.kind === "claude") st = `<span class="spinner"></span> ${esc(mover.name)} is thinking… <span class="muted">(its Claude chat must be running)</span>`;
+    else if (mover?.kind === "ai") st = `<span class="spinner"></span> ${esc(mover.name)} is thinking…`;
+    else if (me === null) st = `👀 Watching · ${esc(mover?.name)} to move`;
+    else st = `<span class="spinner"></span> Waiting for ${esc(mover?.name || "your friend")}…`;
     $("#status").innerHTML = st;
+    clearInterval(countdownT);
+    if (s.nextAt) countdownT = setInterval(() => { const cd = $("#cd"); if (cd) cd.textContent = Math.max(0, Math.ceil((s.nextAt - Date.now()) / 1000)); }, 500);
 
     // result overlay
     if (s.winner !== null) {
       const youWon = s.winner === me, draw = s.winner === 0;
-      const title = draw ? "Draw!" : me === null ? `${s.players.find((p) => p.seat === s.winner).name} wins` : youWon ? "You win! 🎉" : `${opp?.name || "Opponent"} wins`;
+      const winnerName = s.players.find((p) => p.seat === s.winner)?.name;
+      const opp = s.players.find((p) => p.seat !== me);
+      const title = draw ? "Draw!" : me === null ? `${winnerName} wins` : youWon ? "You win! 🎉" : `${opp?.name || "Opponent"} wins`;
       if (prevWinner === null && animate) {
-        if (youWon) { sfx.win(); confetti(); } else if (draw) sfx.win(); else sfx.lose();
+        if (youWon || (me === null && !draw)) { sfx.win(); confetti(); } else if (draw) sfx.win(); else sfx.lose();
       }
       const iAsked = s.rematch.includes(me), theyAsked = s.rematch.some((x) => x !== null && x !== me);
-      const sub = me === null ? "" : iAsked ? "Waiting for your opponent to accept the rematch…" : theyAsked ? `<b>${esc(opp?.name)} wants a rematch!</b>` : `${s.moves.length} moves`;
+      const sub = arena ? `${s.moves.length} moves · score ${s.players[0].wins}-${s.players[1].wins}`
+        : me === null ? "" : iAsked ? "Waiting for your opponent to accept the rematch…" : theyAsked ? `<b>${esc(opp?.name)} wants a rematch!</b>` : `${s.moves.length} moves`;
       const btns = [];
-      if (me !== null && !iAsked) btns.push({ label: theyAsked ? "Accept rematch" : "Rematch", onClick: () => send({ type: "rematch" }) });
-      btns.push({ label: "Leaderboard", cls: "ghost", href: `/leaderboard?mode=${s.mode}` });
-      const card = resultCard({ title, sub, buttons: btns, pts: auth && me !== null ? "Result saved to your stats" : "" });
+      if (arena) btns.push({ label: s.nextAt ? "Start now" : "Next game", onClick: () => send({ type: "rematch" }) });
+      else if (me !== null && !iAsked) btns.push({ label: theyAsked ? "Accept rematch" : "Rematch", onClick: () => send({ type: "rematch" }) });
+      btns.push({ label: "Leaderboard", cls: "ghost", href: arena ? "/leaderboard?who=ai" : `/leaderboard?mode=${s.mode}` });
+      const card = resultCard({ title, sub, buttons: btns, pts: !arena && auth && me !== null ? "Result saved to your stats" : "" });
       setTimeout(() => state === s && board.overlay(card), animate ? 650 : 0);
-    } else board.overlay(null);
+    } else if (!$("#jn")) board.overlay(null);
 
     // side panel
     const side = $("#side");
     side.innerHTML = "";
-    if (isClaude) {
-      side.append(h(`<div class="card panel"><h3>Claude's table talk</h3>
-        <div class="bubble claude"><span class="who">Claude</span>${s.comment ? esc(s.comment) : '<span class="muted">No comment yet.</span>'}</div></div>`));
-      const prompt = `Let's play Connect Four! Join room ${code} with the connect-four tools and play until the game ends.`;
-      const p = h(`<div class="card panel stack"><h3>Start Claude</h3>
-        <p style="margin:0">Paste this into your Claude chat (with the Connect Four MCP connected):</p>
-        <div class="copy-box"><code>${esc(prompt)}</code><button class="btn small" id="cp">Copy</button></div>
-        <a href="/claude" data-link>Setup guide →</a></div>`);
-      $("#cp", p).onclick = () => copy(prompt, "Prompt copied - paste it to Claude");
-      side.append(p);
-    } else {
-      const share = h(`<div class="card panel stack"><h3>${s.ready ? "Room" : "Invite your friend"}</h3>
+    if (me === null && s.ready) side.append(h(`<div class="banner" style="margin-bottom:14px">👀 Watching${s.viewers > 1 ? ` with ${s.viewers - 1} other${s.viewers > 2 ? "s" : ""}` : ""}</div>`));
+    const claudes = s.players.filter((p) => p.kind === "claude");
+    if (claudes.length) {
+      const two = claudes.length === 2;
+      const box = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>✨ Claude ${two ? "players" : ""}</h3>
+        ${s.comment ? `<div class="bubble claude"><span class="who">Latest</span>${esc(s.comment)}</div>` : ""}
+        <p style="margin:0" class="muted">Paste into ${two ? "two separate Claude chats" : "your Claude chat"} (Connect Four MCP connected):</p></div>`);
+      for (const c of claudes) {
+        const prompt = two
+          ? `Let's play Connect Four! Join room ${code} as player ${c.id} with the connect-four tools and keep playing until I say stop.`
+          : arena ? `Let's play Connect Four! Join room ${code} with the connect-four tools and keep playing until I say stop.`
+          : `Let's play Connect Four! Join room ${code} with the connect-four tools and play until the game ends.`;
+        const row = h(`<div class="copy-box"><code>${esc(prompt)}</code><button class="btn small">Copy</button></div>`);
+        $("button", row).onclick = () => copy(prompt, `Prompt${two ? ` for player ${c.id}` : ""} copied - paste it to Claude`);
+        box.append(row);
+      }
+      box.append(h('<a href="/claude" data-link>Setup guide →</a>'));
+      side.append(box);
+    }
+    if (arena) {
+      const set = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>Match settings</h3>
+        <div class="seg" id="spd">${["fast", "normal", "slow"].map((v) => `<button data-v="${v}" aria-pressed="${s.speed === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join("")}</div>
+        <label class="switch"><input type="checkbox" id="auto" ${s.autoNext ? "checked" : ""}/> Auto-play next game</label>
+        <div class="copy-box"><code>${esc(link)}</code><button class="btn small" id="cl">Copy</button></div>
+        <p class="muted" style="margin:0;font-size:.85rem">Computer moves are calculated in watchers' browsers - the match pauses when nobody is watching.</p></div>`);
+      $$("#spd button", set).forEach((b) => (b.onclick = () => send({ type: "settings", speed: b.dataset.v })));
+      $("#auto", set).onchange = (e) => send({ type: "settings", autoNext: e.target.checked });
+      $("#cl", set).onclick = () => copy(link, "Link copied");
+      side.append(set);
+    } else if (s.mode === "friend") {
+      const share = h(`<div class="card panel stack" style="margin-bottom:14px"><h3>${s.ready ? "Room" : "Invite your friend"}</h3>
         <div class="share-code">${esc(code)}</div>
         <div class="copy-box"><code>${esc(link)}</code><button class="btn small" id="cl">Copy</button></div>
         ${navigator.share ? '<button class="btn ghost" id="sh">Share link…</button>' : ""}</div>`);
       $("#cl", share).onclick = () => copy(link, "Link copied - send it to your friend");
       $("#sh", share)?.addEventListener("click", () => navigator.share({ title: "Connect Four", text: "Play Connect Four with me!", url: link }).catch(() => {}));
       side.append(share);
-      if (me !== null) {
-        const em = h(`<div class="card panel"><h3>React</h3><div class="emojis">${["👍", "😂", "😮", "😡", "🔥", "🎉", "🤔", "👋"].map((e) => `<button>${e}</button>`).join("")}</div></div>`);
-        $$("button", em).forEach((b) => (b.onclick = () => send({ type: "emoji", e: b.textContent })));
-        side.append(em);
-      }
+    }
+    if (me !== null && !arena) {
+      const em = h(`<div class="card panel" style="margin-bottom:14px"><h3>React</h3><div class="emojis">${["👍", "😂", "😮", "😡", "🔥", "🎉", "🤔", "👋"].map((e) => `<button>${e}</button>`).join("")}</div></div>`);
+      $$("button", em).forEach((b) => (b.onclick = () => send({ type: "emoji", e: b.textContent })));
+      side.append(em);
     }
     if (me !== null && !auth) {
-      const n = h(`<div class="note">Playing as a guest. <a href="#">Sign in</a> to count this room's wins on the leaderboard.</div>`);
+      const n = h(`<div class="note" style="margin-bottom:14px">Playing as a guest. <a href="#">Sign in</a> to count this room's wins on the leaderboard.</div>`);
       $("a", n).onclick = (e) => { e.preventDefault(); openAuth(); };
       side.append(n);
     }
-    if (me === null && s.ready) side.prepend(h('<div class="banner">This room is full - you are watching.</div>'));
+    void chatHistory;
   }
   const onKey = (e) => {
     if (e.target.closest("input, dialog[open]")) return;
     if (e.key >= "1" && e.key <= "7") send({ type: "move", col: Number(e.key) - 1 });
   };
   document.addEventListener("keydown", onKey);
-  return () => { disposed = true; clearInterval(pingT); ws?.close(); document.removeEventListener("keydown", onKey); };
+  return () => {
+    disposed = true; clearInterval(pingT); clearInterval(countdownT); aiWorker?.terminate(); ws?.close();
+    document.removeEventListener("keydown", onKey);
+  };
+}
+
+/* ---------------- watch: create AI-vs-AI matches, live list */
+const SEAT_OPTIONS = [["claude", "✨ Claude (via MCP)"], ...Object.keys(LEVELS).map((k) => [`ai:${k}`, `🤖 Computer · ${LEVELS[k].name}`])];
+function liveList(rooms) {
+  if (!rooms.length) return '<div class="empty">No live matches right now - start one!</div>';
+  return `<div class="live-list">${rooms.map((r) => `<a class="live" href="/r/${esc(r.id)}" data-link>
+    <span class="pulse ${r.status === "live" ? "" : "done"}"></span>
+    <span><b>${esc(r.red)}</b> <span class="muted">vs</span> <b>${esc(r.yellow)}</b><br><span class="muted" style="font-size:.85rem">Game ${r.game} · score ${esc(r.score)} · ${r.viewers} watching</span></span>
+    <span class="btn small ghost">Watch</span></a>`).join("")}</div>`;
+}
+function viewWatch() {
+  let red = ls.get("c4.arena.red", "ai:master"), yellow = ls.get("c4.arena.yellow", "ai:hard"), speed = "normal", auto = true;
+  const sel = (id, v) => `<select class="input" id="${id}">${SEAT_OPTIONS.map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  app.innerHTML = `
+    <div class="page-head"><div class="eyebrow">Spectate</div><h1>Watch AI vs AI</h1>
+      <p>Pick two players - computer levels or Claude - and watch them battle, chat included. Claude vs Claude works too: connect two Claude chats (any models) and see which model wins. Every Claude model has one shared leaderboard account.</p></div>
+    <div class="game split">
+      <div class="card stack">
+        <h3>New match</h3>
+        <div class="vs-pick">
+          <div class="field"><label for="red">🔴 Red (opens game 1)</label>${sel("red", red)}</div>
+          <div class="vs">VS</div>
+          <div class="field"><label for="yellow">🟡 Yellow</label>${sel("yellow", yellow)}</div>
+        </div>
+        <div class="row"><span class="muted" style="font-weight:600">Speed</span>
+          <div class="seg" id="w-speed">${["fast", "normal", "slow"].map((v) => `<button data-v="${v}" aria-pressed="${v === speed}">${v[0].toUpperCase() + v.slice(1)}</button>`).join("")}</div>
+          <label class="switch"><input type="checkbox" id="w-auto" checked /> Auto-play next game</label></div>
+        <div class="row">
+          <button class="btn" id="w-go">Start match</button>
+          <button class="btn ghost" id="w-quick">⚡ Quick: Master vs Expert</button>
+        </div>
+        <p class="note" id="w-note" style="margin:0" hidden></p>
+      </div>
+      <div class="card"><div class="chart-head"><h3 style="margin:0">🔴 Live now</h3><a href="/chat" data-link>General chat →</a></div><div id="live"><div class="empty"><span class="spinner"></span></div></div></div>
+    </div>`;
+  const note = () => {
+    const n = [red, yellow].filter((v) => v === "claude").length;
+    $("#w-note").hidden = !n;
+    $("#w-note").innerHTML = n === 2
+      ? "Two Claude seats: after starting, copy the prompt for player A into one Claude chat and player B into another (they can be different models, e.g. Opus vs Sonnet)."
+      : "After starting, copy the prompt shown in the room into your Claude chat (Connect Four MCP connected - see the <a href='/claude' data-link>Claude guide</a>).";
+  };
+  note();
+  $("#red").onchange = (e) => { red = e.target.value; ls.set("c4.arena.red", red); note(); };
+  $("#yellow").onchange = (e) => { yellow = e.target.value; ls.set("c4.arena.yellow", yellow); note(); };
+  $$("#w-speed button").forEach((b) => (b.onclick = () => { speed = b.dataset.v; $$("#w-speed button").forEach((x) => x.setAttribute("aria-pressed", x === b)); }));
+  $("#w-auto").onchange = (e) => (auto = e.target.checked);
+  const create = async (r, y, btn) => {
+    btn.disabled = true;
+    try {
+      const res = await api("/api/rooms", { method: "POST", body: { mode: "arena", red: r, yellow: y, speed, autoNext: auto } });
+      ls.set(`c4.room.${res.id}`, res.token);
+      navigate(`/r/${res.id}`);
+    } catch (e) { toast(e.message); btn.disabled = false; }
+  };
+  $("#w-go").onclick = (e) => create(red, yellow, e.target);
+  $("#w-quick").onclick = (e) => create("ai:master", "ai:expert", e.target);
+  const load = () => api("/api/lobby").then((d) => { const el = $("#live"); if (el) el.innerHTML = liveList(d.rooms); }).catch(() => {});
+  load();
+  const t = setInterval(load, 8000);
+  return () => clearInterval(t);
+}
+
+/* ---------------- general chat */
+function viewChat() {
+  let ws, disposed = false, retry = 0, me = null;
+  app.innerHTML = `
+    <div class="page-head"><div class="eyebrow">Community</div><h1>General chat</h1>
+      <p>Talk with everyone on the site. ${auth ? `You chat as <b>${esc(auth.name)}</b>.` : `You're a guest - <a href="#" id="c-sign">sign in</a> to chat with your account name.`} Claude can join in too with the <code>lobby_chat</code> tool.</p></div>
+    <div class="game split">
+      <div class="card"><div class="chart-head"><h3 style="margin:0">💬 Everyone</h3><span class="muted" id="online"></span></div><div id="chat-slot"></div></div>
+      <div class="card"><div class="chart-head"><h3 style="margin:0">🔴 Live matches</h3><a href="/watch" data-link>Start one →</a></div><div id="live"></div></div>
+    </div>`;
+  $("#c-sign")?.addEventListener("click", (e) => { e.preventDefault(); openAuth(); });
+  const chat = chatBox({ tall: true, onSend: (text) => ws?.readyState === 1 && ws.send(JSON.stringify({ type: "chat", text })), meName: () => me });
+  $("#chat-slot").append(chat.el);
+  const guestName = ls.get("c4.name", "");
+  function connect() {
+    const q = new URLSearchParams({ name: auth?.name || guestName || "", auth: auth?.token || "" });
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/lobby/ws?${q}`);
+    ws.onopen = () => (retry = 0);
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type === "hello") {
+        me = m.name;
+        chat.set(m.chat);
+        $("#live").innerHTML = liveList(m.rooms);
+        $("#online").textContent = `${m.online} online · you are ${m.name}`;
+      } else if (m.type === "chat") chat.add(m.msg);
+      else if (m.type === "rooms") $("#live").innerHTML = liveList(m.rooms);
+      else if (m.type === "online" || m.type === "pong") $("#online").textContent = `${m.online} online · you are ${me}`;
+      else if (m.type === "error") toast(m.message);
+    };
+    ws.onclose = () => { if (!disposed) setTimeout(connect, Math.min(8000, 500 * 2 ** retry++)); };
+  }
+  connect();
+  const ping = setInterval(() => ws?.readyState === 1 && ws.send('{"type":"ping"}'), 25000);
+  return () => { disposed = true; clearInterval(ping); ws?.close(); };
 }
 
 /* ---------------- Claude guide + room creation */
@@ -729,12 +921,15 @@ function viewClaude() {
           <p>Choose who opens, then create the room. You'll land on the board.</p>
           <div class="row"><div class="seg" id="c-first">${[["me", "I start"], ["claude", "Claude starts"], ["random", "Random"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === first}">${l}</button>`).join("")}</div>
           <button class="btn claude" id="c-create">Create Claude room</button></div>
-          <p class="muted" style="font-size:.9rem">Or just ask Claude: <i>“Create a Connect Four room and play me.”</i> It will send you the link.</p></div>
+          <p class="muted" style="font-size:.9rem">Or just ask Claude: <i>“Create a Connect Four room and play me.”</i> It will send you the link.
+            Want to watch instead? <a href="/watch" data-link>Set up Claude vs the computer or Claude vs Claude</a>.</p></div>
         <div class="step"><h3>Tell Claude to play</h3>
           <p>In your Claude chat, paste the prompt shown next to the board, e.g.</p>
           <div class="copy-box"><code>Let's play Connect Four! Join room ABC123 with the connect-four tools and play until the game ends.</code></div></div>
         <div class="step"><h3>Play!</h3>
-          <p>Drop your pieces on the board. Claude calls <code>wait_for_my_turn</code>, thinks, then <code>play_move</code> - its pieces and comments appear live. ${auth ? "Your result is saved to the leaderboard (8 pts per win)." : "<a href='#' id='c-sign'>Sign in</a> to put wins vs Claude on the leaderboard (8 pts each)."}</p></div>
+          <p>Drop your pieces on the board. Claude calls <code>wait_for_my_turn</code>, thinks, then <code>play_move</code> - its pieces and chat messages appear live, and it reads the room chat, so talk to it! ${auth ? "Your result is saved to the leaderboard (8 pts per win)." : "<a href='#' id='c-sign'>Sign in</a> to put wins vs Claude on the leaderboard (8 pts each)."}</p></div>
+        <div class="step"><h3>One account per Claude model</h3>
+          <p>Claude passes its model id (e.g. <code>claude-opus-5-5</code>) with every call. All games of the same model - from every user - add up on one shared leaderboard account like <b>Claude Opus 5.5</b>. Compare models on the <a href="/leaderboard?who=ai" data-link>AI leaderboard</a>.</p></div>
       </div>
       <aside class="side">
         <div class="card panel stack"><h3>Server URL</h3>
@@ -742,11 +937,14 @@ function viewClaude() {
           <p class="muted" style="margin:0;font-size:.9rem">Streamable HTTP · no auth · tools only</p></div>
         <div class="card panel"><h3>Tools Claude gets</h3>
           <div class="stack" style="gap:8px;font-size:.92rem">
-            <div><code>create_room</code> - new room + link for you</div>
+            <div><code>create_room</code> - room vs you, the computer or another Claude</div>
             <div><code>wait_for_my_turn</code> - waits until Claude must move</div>
             <div><code>play_move</code> - drop in column 1-7, with a comment</div>
             <div><code>get_game</code> - board, scores, result</div>
-            <div><code>rematch</code> - next game, sides swap</div></div></div>
+            <div><code>rematch</code> - next game, sides swap</div>
+            <div><code>send_chat</code> - talk in the room chat</div>
+            <div><code>lobby_chat</code> - read / post in the general chat</div>
+            <div><code>my_stats</code> - its model's shared leaderboard account</div></div></div>
         <div class="card panel"><h3>Troubleshooting</h3>
           <details class="faq"><summary>Claude stopped moving</summary><p>Claude only acts while its chat is running. Say “your move” or “keep playing” and it will call <code>wait_for_my_turn</code> again.</p></details>
           <details class="faq"><summary>Tools don't show up</summary><p>Claude Code: run <code>/mcp</code> to check the server is connected, or restart Claude. claude.ai: enable the connector in the chat's tools menu.</p></details>
@@ -787,23 +985,27 @@ function viewClaude() {
 }
 
 /* ---------------- leaderboard */
-function lbTable(rows, mode) {
+const botIcon = (kind) => (kind === "claude" ? "✨" : kind === "ai" ? "🤖" : "");
+function lbTable(rows) {
   const medal = (i) => (i < 3 ? `<span class="rank medal ${"gsb"[i]}">${i + 1}</span>` : `<span class="rank">${i + 1}</span>`);
   return `<div class="table-wrap"><table class="lb"><thead><tr>
     <th>#</th><th>Player</th><th class="num">Points</th><th class="num">W</th><th class="num">L</th><th class="num">D</th><th>Win rate</th><th class="num">Games</th></tr></thead><tbody>
     ${rows.map((r, i) => {
       const wr = r.games ? Math.round((r.wins / r.games) * 100) : 0;
+      const bot = r.kind && r.kind !== "human";
+      const av = bot
+        ? `<span class="avatar" style="background:${r.kind === "claude" ? "var(--claude)" : "var(--accent)"}">${botIcon(r.kind)}</span>`
+        : `<span class="avatar" style="background:${avatarColor(r.name)}">${esc(initials(r.name))}</span>`;
       return `<tr class="${auth && r.name.toLowerCase() === auth.name.toLowerCase() ? "me" : ""}">
         <td>${medal(i)}</td>
-        <td><a class="who-cell" href="/u/${encodeURIComponent(r.name)}" data-link><span class="avatar" style="background:${avatarColor(r.name)}">${esc(initials(r.name))}</span>${esc(r.name)}</a></td>
+        <td><a class="who-cell" href="/u/${encodeURIComponent(r.name)}" data-link>${av}<span>${esc(r.name)}${r.key?.startsWith("model:") ? `<br><span class="muted mono" style="font-size:.75rem;font-weight:500">${esc(r.key.slice(6))}</span>` : ""}</span></a></td>
         <td class="num"><b>${+Number(r.points).toFixed(1)}</b></td><td class="num">${r.wins}</td><td class="num">${r.losses}</td><td class="num">${r.draws}</td>
         <td><span class="wr"><span class="bar"><i style="width:${wr}%"></i></span>${wr}%</span></td><td class="num">${r.games}</td></tr>`;
     }).join("")}</tbody></table></div>`;
-  void mode;
 }
 
 function stackedBars(rows) {
-  // rows: [{label, wins, losses, draws}] - one horizontal bar per opponent
+  // rows: [{label, wins, losses, draws}] - one horizontal bar per row
   const max = Math.max(1, ...rows.map((r) => r.wins + r.losses + r.draws));
   return `<div class="legend" style="margin-bottom:10px"><span><i style="background:var(--s-win)"></i>Wins</span><span><i style="background:var(--s-loss)"></i>Losses</span><span><i style="background:var(--s-draw)"></i>Draws</span></div>
     <div class="sbars">${rows.map((r) => {
@@ -814,37 +1016,58 @@ function stackedBars(rows) {
         <span class="tot">${tot}</span></div>`;
     }).join("")}</div>`;
 }
+const OPP_ORDER = [...Object.keys(LEVELS).map((k) => `ai:${k}`), "claude:claude", "friend:friend", "human:human"];
+function oppLabel(mode, level) {
+  if (mode === "ai") return LEVELS[level]?.name ? `Computer · ${LEVELS[level].name}` : "Computer";
+  return { claude: "Claude", friend: "Friends", human: "Humans" }[mode] || mode;
+}
 function opponentRows(list, include = () => true) {
-  const order = [...LEVEL_KEYS.map((k) => `ai:${k}`), "claude:claude", "friend:friend"];
   return list
     .filter(include)
-    .map((r) => ({ key: `${r.mode}:${r.level}`, label: r.mode === "ai" ? LEVELS[r.level]?.name || r.level : r.mode === "claude" ? "Claude" : "Friends", wins: r.wins, losses: r.losses, draws: r.draws }))
-    .sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+    .map((r) => ({ key: `${r.mode}:${r.mode === "ai" ? r.level : r.mode}`, label: oppLabel(r.mode, r.level), wins: r.wins, losses: r.losses, draws: r.draws }))
+    .sort((a, b) => OPP_ORDER.indexOf(a.key) - OPP_ORDER.indexOf(b.key));
 }
 
 function viewLeaderboard() {
   const q = new URLSearchParams(location.search);
+  let who = q.get("who") === "ai" ? "ai" : "humans";
   let mode = q.get("mode") || "all", level = q.get("level") || "", days = q.get("days") || "";
+  const modeOpts = () => who === "ai"
+    ? [["all", "All"], ["human", "Vs Humans"], ["ai", "Vs Computer"], ["claude", "Vs Claude"]]
+    : [["all", "All"], ["ai", "Vs Computer"], ["claude", "Vs Claude"], ["friend", "Vs Friends"]];
   app.innerHTML = `
     <div class="page-head"><div class="eyebrow">Hall of fame</div><h1>Leaderboard</h1>
-      <p>Points per win: Beginner 1 · Easy 2 · Medium 3 · Hard 5 · Expert 8 · Master 13 · Claude 8 · Friend 5. Draws give half.</p></div>
+      <p>Points per win: Beginner 1 · Easy 2 · Medium 3 · Hard 5 · Expert 8 · Master 13 · Claude 8 · Friend 5 · Human 8. Draws give half.
+      Every Claude model has <b>one shared account</b> - all users' MCP games add up.</p></div>
     <div class="filters">
-      <div class="seg" id="lb-mode">${[["all", "All"], ["ai", "Vs Computer"], ["claude", "Vs Claude"], ["friend", "Vs Friends"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === mode}">${l}</button>`).join("")}</div>
-      <select class="input" id="lb-level" style="width:auto" ${mode === "ai" ? "" : "hidden"}>
-        <option value="">All levels</option>${LEVEL_KEYS.map((k) => `<option value="${k}" ${k === level ? "selected" : ""}>${LEVELS[k].name}</option>`).join("")}</select>
+      <div class="seg" id="lb-who">${[["humans", "👤 Humans"], ["ai", "✨ AI & Claude models"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === who}">${l}</button>`).join("")}</div>
+    </div>
+    <div class="filters">
+      <div class="seg" id="lb-mode"></div>
+      <select class="input" id="lb-level" style="width:auto">
+        <option value="">All levels</option>${Object.keys(LEVELS).map((k) => `<option value="${k}" ${k === level ? "selected" : ""}>${LEVELS[k].name}</option>`).join("")}</select>
       <div class="seg" id="lb-days">${[["", "All time"], ["30", "30 days"], ["7", "7 days"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === days}">${l}</button>`).join("")}</div>
       ${auth ? "" : '<button class="btn small" id="lb-sign" style="margin-left:auto">Sign in to compete</button>'}
     </div>
     <div class="tiles" id="lb-tiles"></div>
     <div class="game split">
       <div class="card"><div id="lb-table"><div class="empty"><span class="spinner"></span></div></div></div>
-      <div class="card"><div class="chart-head"><h3 style="margin:0">How humans do vs each opponent</h3></div><div id="lb-chart"></div>
-        <p class="muted" style="font-size:.85rem;margin:12px 0 0">Results from the human side. Friend games count once per signed-in player.</p></div>
+      <div class="card"><div class="chart-head"><h3 style="margin:0" id="chart-title"></h3></div><div id="lb-chart"></div>
+        <p class="muted" style="font-size:.85rem;margin:12px 0 0" id="chart-note"></p></div>
     </div>`;
   $("#lb-sign")?.addEventListener("click", () => openAuth());
   let stats = null;
+  const renderModes = () => {
+    if (!modeOpts().some(([v]) => v === mode)) mode = "all";
+    $("#lb-mode").innerHTML = modeOpts().map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === mode}">${l}</button>`).join("");
+    $$("#lb-mode button").forEach((b) => b.addEventListener("click", () => {
+      mode = b.dataset.v; if (mode !== "ai") level = "";
+      $$("#lb-mode button").forEach((x) => x.setAttribute("aria-pressed", x === b)); sync();
+    }));
+  };
   const sync = () => {
     const p = new URLSearchParams();
+    if (who === "ai") p.set("who", "ai");
     if (mode !== "all") p.set("mode", mode);
     if (mode === "ai" && level) p.set("level", level);
     if (days) p.set("days", days);
@@ -852,34 +1075,51 @@ function viewLeaderboard() {
     $("#lb-level").hidden = mode !== "ai";
     load();
   };
-  $$("#lb-mode button").forEach((b) => b.addEventListener("click", () => {
-    mode = b.dataset.v; if (mode !== "ai") level = "";
-    $$("#lb-mode button").forEach((x) => x.setAttribute("aria-pressed", x === b)); sync();
+  $$("#lb-who button").forEach((b) => b.addEventListener("click", () => {
+    who = b.dataset.v; $$("#lb-who button").forEach((x) => x.setAttribute("aria-pressed", x === b)); renderModes(); sync();
   }));
   $$("#lb-days button").forEach((b) => b.addEventListener("click", () => {
     days = b.dataset.v; $$("#lb-days button").forEach((x) => x.setAttribute("aria-pressed", x === b)); sync();
   }));
   $("#lb-level").addEventListener("change", (e) => { level = e.target.value; sync(); });
+  renderModes();
+  $("#lb-level").hidden = mode !== "ai";
 
   async function load() {
-    const p = new URLSearchParams({ mode, level, days });
+    const p = new URLSearchParams({ who, mode, level, days });
     try {
       const [{ rows }, st] = await Promise.all([api(`/api/leaderboard?${p}`), stats ? Promise.resolve(stats) : api("/api/stats")]);
       stats = st;
-      $("#lb-table").innerHTML = rows.length ? lbTable(rows, mode) : '<div class="empty">No results for this filter yet.</div>';
-      const inFilter = (r) => (mode === "all" || r.mode === mode) && (!level || r.level === level);
-      const scoped = stats.byMode.filter(inFilter);
-      const games = scoped.reduce((a, r) => a + r.games, 0);
-      const humanWins = scoped.filter((r) => r.mode !== "friend").reduce((a, r) => a + r.wins, 0);
-      const humanGames = scoped.filter((r) => r.mode !== "friend").reduce((a, r) => a + r.games, 0);
-      $("#lb-tiles").innerHTML = [
-        ["Players", stats.players],
-        ["Games recorded", games],
-        ["Human win rate", humanGames ? `${Math.round((humanWins / humanGames) * 100)}%` : "-"],
-        ["Leader", rows[0] ? esc(rows[0].name) : "-"],
-      ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-      const chartRows = opponentRows(stats.byMode, (r) => inFilter(r) && r.mode !== "friend");
-      $("#lb-chart").innerHTML = chartRows.length ? stackedBars(chartRows) : '<div class="empty">No games yet.</div>';
+      $("#lb-table").innerHTML = rows.length ? lbTable(rows) : `<div class="empty">No results for this filter yet.${who === "ai" ? ' <a href="/watch" data-link>Start an AI match →</a>' : ""}</div>`;
+      if (who === "ai") {
+        const claudeRows = stats.bots.filter((b) => b.kind === "claude");
+        $("#lb-tiles").innerHTML = [
+          ["Claude models", claudeRows.length],
+          ["AI games", stats.aiGames],
+          ["Top AI", rows[0] ? `${botIcon(rows[0].kind)} ${esc(rows[0].name)}` : "-"],
+          ["Top Claude", claudeRows[0] ? esc(claudeRows[0].name) : "-"],
+        ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v" style="font-size:${String(v).length > 12 ? "1.2rem" : ""}">${v}</div></div>`).join("");
+        $("#chart-title").textContent = "Record of each AI";
+        $("#chart-note").textContent = "All games of each Claude model and computer level, against anyone.";
+        const chartRows = stats.bots.slice(0, 10).map((b) => ({ label: `${botIcon(b.kind)} ${b.name}`, wins: b.wins, losses: b.losses, draws: b.draws }));
+        $("#lb-chart").innerHTML = chartRows.length ? stackedBars(chartRows) : '<div class="empty">No AI games yet.</div>';
+      } else {
+        const inFilter = (r) => (mode === "all" || r.mode === mode) && (!level || r.level === level);
+        const scoped = stats.byMode.filter(inFilter);
+        const games = scoped.reduce((a, r) => a + r.games, 0);
+        const vsBots = scoped.filter((r) => r.mode !== "friend");
+        const hw = vsBots.reduce((a, r) => a + r.wins, 0), hg = vsBots.reduce((a, r) => a + r.games, 0);
+        $("#lb-tiles").innerHTML = [
+          ["Players", stats.players],
+          ["Games recorded", games],
+          ["Human win rate vs AI", hg ? `${Math.round((hw / hg) * 100)}%` : "-"],
+          ["Leader", rows[0] ? esc(rows[0].name) : "-"],
+        ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+        $("#chart-title").textContent = "How humans do vs each opponent";
+        $("#chart-note").textContent = "Results from the human side. Friend games count once per signed-in player.";
+        const chartRows = opponentRows(stats.byMode, (r) => inFilter(r) && r.mode !== "friend");
+        $("#lb-chart").innerHTML = chartRows.length ? stackedBars(chartRows) : '<div class="empty">No games yet.</div>';
+      }
     } catch (e) {
       $("#lb-table").innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`;
     }
@@ -887,29 +1127,33 @@ function viewLeaderboard() {
   load();
 }
 
-/* ---------------- player profile */
+/* ---------------- player profile (humans, Claude models, computer levels) */
 async function viewProfile(name) {
   app.innerHTML = '<div class="empty"><span class="spinner"></span></div>';
   let p;
   try { p = await api(`/api/players/${encodeURIComponent(name)}`); }
   catch { app.innerHTML = `<div class="card empty" style="margin-top:30px">No player called <b>${esc(name)}</b>. <a href="/leaderboard" data-link>Back to the leaderboard</a></div>`; return; }
+  const bot = p.kind && p.kind !== "human";
   const tot = p.breakdown.reduce((a, r) => ({ w: a.w + r.wins, l: a.l + r.losses, d: a.d + r.draws, pts: a.pts + r.points }), { w: 0, l: 0, d: 0, pts: 0 });
   const games = tot.w + tot.l + tot.d;
-  // 30-day activity
   const dayMs = 86400000;
   const start = Math.floor((Date.now() - 29 * dayMs) / dayMs) * dayMs;
   const byDay = new Map(p.daily.map((d) => [d.day, d]));
   const days = Array.from({ length: 30 }, (_, i) => ({ date: new Date(start + i * dayMs), ...(byDay.get(i) || { games: 0, wins: 0 }) }));
   const maxG = Math.max(1, ...days.map((d) => d.games));
+  const total30 = days.reduce((a, d) => a + d.games, 0);
   const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const isMe = auth && auth.name.toLowerCase() === p.name.toLowerCase();
+  const avatar = bot
+    ? `<span class="avatar" style="width:64px;height:64px;font-size:1.8rem;background:${p.kind === "claude" ? "var(--claude)" : "var(--accent)"}">${botIcon(p.kind)}</span>`
+    : `<span class="avatar" style="width:64px;height:64px;font-size:1.8rem;background:${avatarColor(p.name)}">${esc(initials(p.name))}</span>`;
   app.innerHTML = `
-    <div class="page-head row" style="gap:16px">
-      <span class="avatar" style="width:64px;height:64px;font-size:1.8rem;background:${avatarColor(p.name)}">${esc(initials(p.name))}</span>
-      <div><div class="eyebrow">${isMe ? "Your stats" : "Player"}</div><h1 style="margin:0">${esc(p.name)}</h1>
-        <span class="muted">Member since ${new Date(p.created).toLocaleDateString()}</span></div></div>
+    <div class="page-head row" style="gap:16px">${avatar}
+      <div><div class="eyebrow">${isMe ? "Your stats" : p.kind === "claude" ? "Claude model · shared account" : p.kind === "ai" ? "Computer player" : "Player"}</div>
+        <h1 style="margin:0">${esc(p.name)}</h1>
+        <span class="muted">${p.model ? `<span class="mono">${esc(p.model)}</span> · every user's games with this model · ` : ""}since ${new Date(p.created).toLocaleDateString()}</span></div></div>
     <div class="tiles">
-      <div class="tile"><div class="k">Rank</div><div class="v">#${p.rank}</div></div>
+      <div class="tile"><div class="k">Rank ${bot ? "(AIs)" : ""}</div><div class="v">#${p.rank}</div></div>
       <div class="tile"><div class="k">Points</div><div class="v">${+tot.pts.toFixed(1)}</div></div>
       <div class="tile"><div class="k">Games</div><div class="v">${games}</div></div>
       <div class="tile"><div class="k">Win rate</div><div class="v">${games ? Math.round((tot.w / games) * 100) + "%" : "-"}</div></div>
@@ -917,14 +1161,14 @@ async function viewProfile(name) {
     <div class="grid-2">
       <div class="card"><div class="chart-head"><h3 style="margin:0">Results by opponent</h3></div>
         ${p.breakdown.length ? stackedBars(opponentRows(p.breakdown)) : '<div class="empty">No games yet.</div>'}</div>
-      <div class="card"><div class="chart-head"><h3 style="margin:0">Games played · last 30 days</h3><span class="muted">${(() => { const n = days.reduce((a, d) => a + d.games, 0); return `${n} game${n === 1 ? "" : "s"}`; })()}</span></div>
+      <div class="card"><div class="chart-head"><h3 style="margin:0">Games played · last 30 days</h3><span class="muted">${total30} game${total30 === 1 ? "" : "s"}</span></div>
         <div class="cols">${days.map((d) => `<i class="${d.games ? "" : "zero"}" style="height:${(d.games / maxG) * 100}%" tabindex="${d.games ? 0 : -1}"
           data-tip="<b>${fmt(d.date)}</b>${d.games} game${d.games === 1 ? "" : "s"} · ${d.wins} win${d.wins === 1 ? "" : "s"}"></i>`).join("")}</div>
         <div class="axis"><span>${fmt(days[0].date)}</span><span>${fmt(days[15].date)}</span><span>Today</span></div></div>
     </div>
     <div class="card" style="margin-top:16px"><h3>Recent games</h3>
       ${p.recent.length ? `<div class="recent">${p.recent.map((g) => `<div><span class="tag ${g.outcome}">${g.outcome}</span>
-        <span>vs <b>${esc(g.mode === "ai" ? opponentLabel("ai", g.level) : g.opponent || opponentLabel(g.mode))}</b> <span class="muted">· ${g.moves} moves</span></span>
+        <span>vs <b>${esc(g.opponent || oppLabel(g.mode, g.level))}</b> <span class="muted">· ${g.moves} moves</span></span>
         <span class="muted">${g.points ? `+${g.points} · ` : ""}${new Date(g.created).toLocaleDateString()}</span></div>`).join("")}</div>` : '<div class="empty">No games yet.</div>'}</div>`;
 }
 
@@ -936,6 +1180,8 @@ const routes = [
   [/^\/friend\/?$/, viewFriend],
   [/^\/r\/([A-Za-z0-9]{6})$/, viewRoom],
   [/^\/claude\/?$/, viewClaude],
+  [/^\/watch\/?$/, viewWatch],
+  [/^\/chat\/?$/, viewChat],
   [/^\/leaderboard\/?$/, viewLeaderboard],
   [/^\/u\/(.+)$/, (n) => viewProfile(decodeURIComponent(n))],
 ];
@@ -949,7 +1195,7 @@ function render() {
       const r = view(...m.slice(1));
       if (typeof r === "function") cleanup = r;
       updateHeader();
-      const titles = { "/": "Connect Four", "/play": "Play · Connect Four", "/leaderboard": "Leaderboard · Connect Four", "/claude": "Play Claude · Connect Four", "/friend": "Play a friend · Connect Four" };
+      const titles = { "/": "Connect Four", "/watch": "Watch · Connect Four", "/chat": "Chat · Connect Four", "/play": "Play · Connect Four", "/leaderboard": "Leaderboard · Connect Four", "/claude": "Play Claude · Connect Four", "/friend": "Play a friend · Connect Four" };
       document.title = titles[path] || (path.startsWith("/r/") ? `Room ${path.slice(3)} · Connect Four` : "Connect Four");
       return;
     }

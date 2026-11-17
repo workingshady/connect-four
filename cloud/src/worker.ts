@@ -3,6 +3,7 @@ import { createRoom, roomStub } from "./rooms";
 
 export { Room } from "./room";
 export { Leaderboard } from "./leaderboard";
+export { Lobby } from "./lobby";
 import { fromMoves, result } from "../public/js/rules.js";
 import { LEVEL_POINTS } from "./leaderboard";
 
@@ -16,9 +17,11 @@ export default {
     if (path === "/mcp" || path === "/mcp/") return handleMcp(req, env);
 
     if (path === "/api/rooms" && req.method === "POST") {
-      const body = (await req.json().catch(() => ({}))) as { mode?: string; first?: string; name?: string };
+      const body = (await req.json().catch(() => ({}))) as { mode?: string; first?: string; name?: string; red?: string; yellow?: string; speed?: string; autoNext?: boolean };
+      const mode = body.mode === "claude" || body.mode === "arena" ? body.mode : "friend";
       const room = await createRoom(env, {
-        mode: body.mode === "claude" ? "claude" : "friend", first: body.first, name: body.name, auth: bearer(req) || undefined,
+        mode, first: body.first, name: body.name, auth: bearer(req) || undefined,
+        red: body.red, yellow: body.yellow, speed: body.speed, autoNext: body.autoNext,
       });
       return Response.json(room);
     }
@@ -29,6 +32,12 @@ export default {
       const stub = roomStub(env, id);
       if (m[2]) return stub.fetch(`https://room/ws${url.search}`, req);
       return stub.fetch(`https://room/state${url.search}`);
+    }
+
+    // ---- general chat + live matches
+    if (path === "/api/lobby/ws" || path === "/api/lobby") {
+      const lobby = env.LOBBY.get(env.LOBBY.idFromName("global"));
+      return path.endsWith("/ws") ? lobby.fetch(`https://lobby/ws${url.search}`, req) : lobby.fetch("https://lobby/history?n=40");
     }
 
     // ---- accounts & leaderboard
@@ -59,10 +68,18 @@ export default {
       const r = result(fromMoves(moves).board);
       if (!r) return Response.json({ error: "Game not finished" }, { status: 400 });
       const outcome = r.winner === 0 ? "draw" : r.winner === b.seat ? "win" : "loss";
-      return post("/record", {
-        token: bearer(req), mode: "ai", level: b.level, outcome, moves: moves.length,
-        opponent: `AI (${b.level})`, gid: String(b.gid || crypto.randomUUID()).slice(0, 64),
-      });
+      const gid = String(b.gid || crypto.randomUUID()).slice(0, 64);
+      const res = await post("/record", { token: bearer(req), mode: "ai", level: b.level, outcome, moves: moves.length, opponent: `AI (${b.level})`, gid });
+      if (res.ok) {
+        // the computer level's own account gets the mirrored result
+        const me = (await (await post("/me", { token: bearer(req) })).json()) as { name?: string };
+        const level = String(b.level);
+        await post("/record", {
+          key: `ai:${level}`, bot: { name: `AI · ${level[0].toUpperCase()}${level.slice(1)}`, kind: "ai" }, mode: "human",
+          outcome: outcome === "win" ? "loss" : outcome === "loss" ? "win" : "draw", moves: moves.length, opponent: me.name || "?", gid: `${gid}:bot`,
+        });
+      }
+      return res;
     }
 
     if (path.startsWith("/api/")) return Response.json({ error: "Not found" }, { status: 404 });

@@ -6,8 +6,9 @@ import { DurableObject } from "cloudflare:workers";
 export const LEVEL_POINTS: Record<string, number> = {
   beginner: 1, easy: 2, medium: 3, hard: 5, expert: 8, master: 13,
 };
-export const MODE_POINTS: Record<string, number> = { claude: 8, friend: 5 };
-const MODES = ["ai", "claude", "friend"];
+export const MODE_POINTS: Record<string, number> = { claude: 8, friend: 5, human: 8 };
+// results are stored by OPPONENT type: ai (with level), claude, friend (human vs human), human (bot vs human)
+const MODES = ["ai", "claude", "friend", "human"];
 const OUTCOMES = ["win", "loss", "draw"];
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
@@ -40,6 +41,9 @@ export class Leaderboard extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS results_key ON results(key, created);
       CREATE INDEX IF NOT EXISTS results_mode ON results(mode, level);
     `);
+    // v2: bot accounts (Claude models, computer levels) live next to humans
+    const cols = this.sql.exec("PRAGMA table_info(players)").toArray().map((c) => c.name);
+    if (!cols.includes("kind")) this.sql.exec("ALTER TABLE players ADD COLUMN kind TEXT NOT NULL DEFAULT 'human'");
   }
 
   keyFor(name: string) {
@@ -75,7 +79,7 @@ export class Leaderboard extends DurableObject<Env> {
         const row = this.sql.exec("SELECT name, salt, hash FROM players WHERE key = ?", key).toArray()[0];
         let created = false;
         if (!row) {
-          if (key === "claude") return json({ error: "That name is reserved" }, 400);
+          if (/^(claude|ai\b|ai ·|model:)/.test(key)) return json({ error: "Names starting with Claude or AI are reserved for the bots" }, 400);
           const salt = crypto.randomUUID();
           this.sql.exec("INSERT INTO players (key, name, salt, hash, created) VALUES (?, ?, ?, ?, ?)",
             key, name, salt, await hashPass(passcode, salt), Date.now());
@@ -102,6 +106,13 @@ export class Leaderboard extends DurableObject<Env> {
         // Internal: called by the Worker / Room after validating the game.
         const key = body.key ? String(body.key) : this.sessionKey(String(body.token ?? ""));
         if (!key) return json({ error: "Not signed in" }, 401);
+        const bot = body.bot as { name?: string; kind?: string } | undefined;
+        if (bot?.name && (bot.kind === "claude" || bot.kind === "ai")) {
+          // shared bot account: created on first game, display name kept up to date
+          this.sql.exec(
+            "INSERT INTO players (key, name, salt, hash, created, kind) VALUES (?, ?, '', '', ?, ?) ON CONFLICT(key) DO UPDATE SET name = excluded.name",
+            key, String(bot.name).slice(0, 40), Date.now(), bot.kind);
+        }
         const mode = String(body.mode), level = String(body.level ?? ""), outcome = String(body.outcome);
         if (!MODES.includes(mode) || !OUTCOMES.includes(outcome)) return json({ error: "Bad result" }, 400);
         if (mode === "ai" && !(level in LEVEL_POINTS)) return json({ error: "Bad level" }, 400);
@@ -116,27 +127,29 @@ export class Leaderboard extends DurableObject<Env> {
 
       case "/board": {
         const mode = url.searchParams.get("mode") || "all";
+        const who = url.searchParams.get("who") === "ai" ? "ai" : "humans";
         const level = url.searchParams.get("level") || "";
         const days = Number(url.searchParams.get("days")) || 0;
-        const where: string[] = [];
+        const where: string[] = [who === "ai" ? "p.kind IN ('claude', 'ai')" : "p.kind = 'human'"];
         const args: (string | number)[] = [];
         if (mode !== "all") { where.push("mode = ?"); args.push(mode); }
         if (mode === "ai" && level) { where.push("level = ?"); args.push(level); }
         if (days) { where.push("created >= ?"); args.push(Date.now() - days * 86400000); }
         const rows = this.sql.exec(`
-          SELECT p.name AS name,
+          SELECT p.name AS name, p.kind AS kind, p.key AS key,
                  SUM(outcome = 'win') AS wins, SUM(outcome = 'loss') AS losses, SUM(outcome = 'draw') AS draws,
                  COUNT(*) AS games, SUM(r.points) AS points, MAX(r.created) AS last
           FROM results r JOIN players p ON p.key = r.key
-          ${where.length ? "WHERE " + where.join(" AND ") : ""}
+          WHERE ${where.join(" AND ")}
           GROUP BY r.key ORDER BY points DESC, wins DESC, games ASC LIMIT 100`, ...args).toArray();
         return json({ rows });
       }
 
       case "/player": {
-        const key = this.keyFor(url.searchParams.get("name") || "");
-        const p = this.sql.exec("SELECT name, created FROM players WHERE key = ?", key).toArray()[0];
+        const asked = this.keyFor(url.searchParams.get("name") || "");
+        const p = this.sql.exec("SELECT key, name, created, kind FROM players WHERE key = ? OR lower(name) = ? ORDER BY key = ? DESC LIMIT 1", asked, asked, asked).toArray()[0];
         if (!p) return json({ error: "No such player" }, 404);
+        const key = p.key as string;
         const breakdown = this.sql.exec(`
           SELECT mode, level, SUM(outcome='win') AS wins, SUM(outcome='loss') AS losses, SUM(outcome='draw') AS draws, SUM(points) AS points
           FROM results WHERE key = ? GROUP BY mode, level`, key).toArray();
@@ -146,18 +159,25 @@ export class Leaderboard extends DurableObject<Env> {
         const daily = this.sql.exec(`
           SELECT CAST((created - ?) / 86400000 AS INTEGER) AS day, SUM(outcome='win') AS wins, COUNT(*) AS games
           FROM results WHERE key = ? AND created >= ? GROUP BY day`, since - (since % 86400000), key, since - (since % 86400000)).toArray();
+        const sameKind = p.kind === "human" ? "kind = 'human'" : "kind IN ('claude', 'ai')";
         const rank = this.sql.exec(`
-          SELECT COUNT(*) + 1 AS rank FROM (SELECT SUM(points) AS pts FROM results GROUP BY key)
+          SELECT COUNT(*) + 1 AS rank FROM (
+            SELECT SUM(r.points) AS pts FROM results r JOIN players q ON q.key = r.key WHERE q.${sameKind} GROUP BY r.key)
           WHERE pts > (SELECT COALESCE(SUM(points), 0) FROM results WHERE key = ?)`, key).one().rank;
-        return json({ name: p.name, created: p.created, breakdown, recent, daily, rank });
+        return json({ name: p.name, kind: p.kind, model: key.startsWith("model:") ? key.slice(6) : null, created: p.created, breakdown, recent, daily, rank });
       }
 
       case "/stats": {
+        // humans' results by opponent, and every bot's overall record
         const byMode = this.sql.exec(`
           SELECT mode, level, COUNT(*) AS games, SUM(outcome='win') AS wins, SUM(outcome='loss') AS losses, SUM(outcome='draw') AS draws
-          FROM results GROUP BY mode, level`).toArray();
-        const players = this.sql.exec("SELECT COUNT(*) AS n FROM players").one().n;
-        return json({ byMode, players });
+          FROM results r JOIN players p ON p.key = r.key WHERE p.kind = 'human' GROUP BY mode, level`).toArray();
+        const bots = this.sql.exec(`
+          SELECT p.name AS name, p.kind AS kind, COUNT(*) AS games, SUM(outcome='win') AS wins, SUM(outcome='loss') AS losses, SUM(outcome='draw') AS draws
+          FROM results r JOIN players p ON p.key = r.key WHERE p.kind IN ('claude', 'ai') GROUP BY r.key ORDER BY SUM(r.points) DESC`).toArray();
+        const players = this.sql.exec("SELECT COUNT(*) AS n FROM players WHERE kind = 'human'").one().n;
+        const aiGames = this.sql.exec("SELECT COUNT(*) AS n FROM results r JOIN players p ON p.key = r.key WHERE p.kind IN ('claude', 'ai')").one().n;
+        return json({ byMode, bots, players, aiGames });
       }
     }
     return json({ error: "Not found" }, 404);

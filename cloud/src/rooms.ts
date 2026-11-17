@@ -10,7 +10,7 @@ export function roomStub(env: Env, id: string) {
   return env.ROOMS.get(env.ROOMS.idFromName(id));
 }
 
-export async function createRoom(env: Env, opts: { mode: string; first?: string; name?: string; byClaude?: boolean; auth?: string }) {
+export async function createRoom(env: Env, opts: { mode: string; first?: string; name?: string; byClaude?: boolean; auth?: string; red?: string; yellow?: string; speed?: string; autoNext?: boolean; model?: string }) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const bytes = crypto.getRandomValues(new Uint8Array(6));
     const id = [...bytes].map((b) => ALPHABET[b % ALPHABET.length]).join("");

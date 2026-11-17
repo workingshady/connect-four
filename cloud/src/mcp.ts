@@ -1,78 +1,114 @@
 // Remote MCP server (Streamable HTTP transport, JSON responses, stateless).
 // Lets any MCP client - Claude Code, claude.ai, Claude Desktop - play Connect Four
-// against a human in a room on this site.
+// against a human, the built-in computer or another Claude, and talk in the chat.
+// Every Claude model has one shared leaderboard account (e.g. "Claude Opus 5.5").
 import { fromMoves, result, boardText } from "../public/js/rules.js";
 import { createRoom, roomStub, normaliseRoom } from "./rooms";
+import { modelInfo } from "./models";
 
 const PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+const LEVELS = ["beginner", "easy", "medium", "hard", "expert", "master"];
 
-const INSTRUCTIONS = `You are playing Connect Four against a human on ${"{origin}"}.
+const INSTRUCTIONS = `You play Connect Four on {origin} - against a human, the built-in computer or another Claude - and you can chat.
+IMPORTANT: pass your exact model id as \`model\` on every call (e.g. "claude-opus-5-5", "claude-sonnet-5-5").
+All games of the same model, from every user, count for one shared leaderboard account for that model.
 How to play:
-1. If the user gives you a room code or link, use it. Otherwise call create_room and send the user the link.
-2. Call wait_for_my_turn(room). It returns when it is your turn, the game ends, or after ~40s (then just call it again).
-3. On your turn, think about the board, then call play_move(room, column 1-7, comment). Keep comments short and friendly.
-4. Repeat 2-3. When the game ends, report the result; call rematch(room) if the user wants another game.
+1. If the user gives you a room code or link, use it. Otherwise call create_room and give the user the link.
+   If two Claudes play in the room, you are player "A" or "B" (the user tells you) - pass it as \`player\` on every call.
+2. Call wait_for_my_turn(room). It returns when it is your turn, the game ends, or after ~40s (then call it again).
+3. On your turn, read the board and the recent chat, think, then call play_move(room, column 1-7, comment).
+   The comment is posted to the room chat - talk like a friendly opponent and answer people who talk to you.
+4. Repeat 2-3. In AI-vs-AI match rooms the next game starts automatically - keep calling wait_for_my_turn
+   until the user tells you to stop. Otherwise report the result and call rematch(room) if wanted.
+Use send_chat to talk in a room without moving, and lobby_chat for the site-wide chat.
 Columns are numbered 1-7 from the left; pieces fall to the lowest empty row. Four in a row (any direction) wins.`;
 
+type Player = { seat: number; name: string | null; kind: string; claude: boolean; level: string | null; wins: number; id: string | null; model: string | null };
 type View = {
   id: string; mode: string; game: number; moves: number[]; board: number[]; legal: number[];
   turn: number; winner: number | null; draws: number; ready: boolean; comment: string; you: number | null;
-  players: { seat: number; name: string | null; claude: boolean; wins: number; online: boolean }[];
-  error?: string;
+  players: Player[]; error?: string; nextAt?: number | null;
 };
+type Chat = { name: string; kind: string; text: string };
+
+const modelArg = { model: { type: "string", description: 'Your exact model id, e.g. "claude-opus-5-5". Your games count for that model\'s shared leaderboard account.' } };
+const roomArg = { room: { type: "string", description: "Room code like K7QX2M, or the room link" } };
+const playerArg = { player: { type: "string", enum: ["A", "B"], description: "Only when two Claudes play in the room: which one you are" } };
 
 const TOOLS = [
   {
     name: "create_room",
-    description: "Create a new Connect Four room where you (Claude) play against the user. Returns a link the user opens in their browser to play.",
+    description: "Create a Connect Four room. By default you play the user; you can also play the built-in computer or another Claude while people watch. Returns the link to share.",
     inputSchema: {
       type: "object",
-      properties: { claude_goes_first: { type: "boolean", description: "true = you open game 1 (Red). Default false: the user starts." } },
+      properties: {
+        opponent: { type: "string", enum: ["human", "claude", ...LEVELS], description: '"human" (default: the user plays you), a computer level, or "claude" (a second Claude joins as player B)' },
+        claude_goes_first: { type: "boolean", description: "true = you open game 1 (Red). Default false." },
+        ...modelArg,
+      },
+      required: ["model"],
     },
   },
   {
     name: "get_game",
-    description: "Show the current board, whose turn it is, scores and the result of a Claude room.",
-    inputSchema: { type: "object", properties: { room: { type: "string", description: "Room code like K7QX2M, or the room link" } }, required: ["room"] },
+    description: "Show the board, whose turn it is, scores, result and recent chat of a room.",
+    inputSchema: { type: "object", properties: { ...roomArg, ...playerArg, ...modelArg }, required: ["room", "model"] },
   },
   {
     name: "wait_for_my_turn",
-    description: "Wait (up to ~40s) until it is your turn, the game ends, or the opponent joins. Call again if it returns 'still waiting'.",
-    inputSchema: { type: "object", properties: { room: { type: "string" } }, required: ["room"] },
+    description: "Wait (up to ~40s) until it is your turn or the game ends. Call again if it returns 'still waiting'.",
+    inputSchema: { type: "object", properties: { ...roomArg, ...playerArg, ...modelArg }, required: ["room", "model"] },
   },
   {
     name: "play_move",
-    description: "Drop your piece in a column (1-7, left to right). Optionally include a short comment that the user sees next to the board.",
+    description: "Drop your piece in a column (1-7, left to right). The comment is posted to the room chat.",
     inputSchema: {
       type: "object",
       properties: {
-        room: { type: "string" },
+        ...roomArg,
         column: { type: "integer", minimum: 1, maximum: 7 },
-        comment: { type: "string", description: "Short table talk shown to the user (max 200 chars)" },
+        comment: { type: "string", description: "Short table talk for the chat (max 200 chars)" },
+        ...playerArg,
+        ...modelArg,
       },
-      required: ["room", "column"],
+      required: ["room", "column", "model"],
     },
   },
   {
+    name: "send_chat",
+    description: "Say something in the room chat without making a move (reply to players or spectators).",
+    inputSchema: { type: "object", properties: { ...roomArg, message: { type: "string" }, ...playerArg, ...modelArg }, required: ["room", "message", "model"] },
+  },
+  {
     name: "rematch",
-    description: "Start a new game in the same room after the current one has finished (players swap who opens).",
-    inputSchema: { type: "object", properties: { room: { type: "string" } }, required: ["room"] },
+    description: "Start the next game in the same room after the current one has finished (players swap who opens).",
+    inputSchema: { type: "object", properties: { ...roomArg, ...playerArg, ...modelArg }, required: ["room"] },
+  },
+  {
+    name: "lobby_chat",
+    description: "Read the site-wide chat and the live matches. Pass `message` to post in it.",
+    inputSchema: { type: "object", properties: { message: { type: "string", description: "Optional message to post" }, ...modelArg } },
+  },
+  {
+    name: "my_stats",
+    description: "Show the shared leaderboard account of your model (all users' games combined) and the AI ranking.",
+    inputSchema: { type: "object", properties: { ...modelArg }, required: ["model"] },
   },
 ];
 
-function describe(v: View, origin: string): string {
+function describe(v: View, origin: string, chat: Chat[] = []): string {
   const link = `${origin}/r/${v.id}`;
   const me = v.you ?? 0;
   const opp = me === 1 ? 2 : 1;
   const colour = (seat: number) => (seat === 1 ? "Red" : "Yellow");
-  const oppName = v.players.find((p) => p.seat === opp)?.name || "your opponent";
+  const meP = v.players.find((p) => p.seat === me);
+  const oppP = v.players.find((p) => p.seat === opp);
+  const oppName = oppP?.name || "your opponent";
   const out: string[] = [];
   out.push(`Room ${v.id} (${link}) - game ${v.game + 1}`);
-  out.push(`You are ${colour(me)} = X. ${oppName} is ${colour(opp)} = O.`);
+  out.push(`You are ${meP?.name || "Claude"}${meP?.id ? ` (player ${meP.id})` : ""}: ${colour(me)} = X. ${oppName} is ${colour(opp)} = O.`);
   out.push(boardText(v.board, { [me]: "X", [opp]: "O" }));
-
-  const score = v.players.map((p) => `${p.claude ? "You" : p.name || "?"} ${p.wins}`).join(", ");
-  out.push(`Score: ${score}, draws ${v.draws}.`);
+  out.push(`Score: ${v.players.map((p) => `${p.name || "?"} ${p.wins}`).join(", ")}, draws ${v.draws}.`);
   if (v.moves.length) {
     const last = v.moves[v.moves.length - 1];
     const who = v.moves.length % 2 === 1 ? 1 : 2;
@@ -83,7 +119,9 @@ function describe(v: View, origin: string): string {
     out.push(`STATUS: waiting for the user to open ${link} and join.`);
   } else if (v.winner !== null) {
     out.push(v.winner === 0 ? "STATUS: GAME OVER - draw." : v.winner === me ? "STATUS: GAME OVER - you WON!" : `STATUS: GAME OVER - ${oppName} won.`);
-    out.push("Call rematch(room) to play again (only if the user wants to).");
+    out.push(v.mode === "arena"
+      ? "The next game starts automatically in a few seconds - call wait_for_my_turn to keep playing."
+      : "Call rematch(room) to play again (only if the user wants to).");
   } else if (v.turn === me) {
     out.push(`STATUS: YOUR TURN. Legal columns: ${v.legal.map((c) => c + 1).join(", ")}.`);
     // exact tactical facts, so a misread grid can't cost an obvious move
@@ -100,42 +138,92 @@ function describe(v: View, origin: string): string {
   } else {
     out.push(`STATUS: ${oppName}'s turn - call wait_for_my_turn.`);
   }
+  const talk = chat.filter((m) => m.kind !== "system").slice(-8);
+  if (talk.length) out.push("Recent chat:\n" + talk.map((m) => `  [${m.name}] ${m.text}`).join("\n"));
   return out.join("\n");
 }
 
 async function call(name: string, args: Record<string, unknown>, env: Env, origin: string): Promise<{ text: string; isError?: boolean }> {
+  const model = modelInfo(args.model);
+  const mq = model ? `model=${encodeURIComponent(model.id)}` : "";
+  const noModel = model ? "" : '\n\nNote: pass your exact model id as `model` (e.g. "claude-opus-5-5") so your games count for your model on the leaderboard.';
+
   if (name === "create_room") {
-    const { id } = await createRoom(env, { mode: "claude", first: args.claude_goes_first ? "claude" : "me", byClaude: true });
+    const opponent = String(args.opponent ?? "human");
+    const first = !!args.claude_goes_first;
+    if (opponent === "human") {
+      const { id } = await createRoom(env, { mode: "claude", first: first ? "claude" : "me", byClaude: true, model: model?.id });
+      return { text: `Room created: ${id}\nSend the user this link to play: ${origin}/r/${id}\nThen call wait_for_my_turn("${id}").${noModel}` };
+    }
+    const other = opponent === "claude" ? "claude" : LEVELS.includes(opponent) ? `ai:${opponent}` : "ai:medium";
+    const { id } = await createRoom(env, {
+      mode: "arena", red: first ? "claude" : other, yellow: first ? other : "claude", byClaude: true, autoNext: true, model: model?.id,
+    });
+    const two = opponent === "claude";
     return {
-      text: `Room created: ${id}\nSend the user this link to play: ${origin}/r/${id}\n` +
-        `Then call wait_for_my_turn("${id}").`,
+      text: `Match room created: ${id}\nWatch link for the user: ${origin}/r/${id}\n` +
+        (two
+          ? `Two Claudes play here. You are player "A". Ask the user to tell another Claude (any model): "Join Connect Four room ${id} as player B".\nThen call wait_for_my_turn("${id}", player "A").`
+          : `You play the ${opponent} computer. Its moves are computed in the watchers' browsers, so ask the user to keep the link open. Call wait_for_my_turn("${id}").`) + noModel,
     };
   }
+
+  if (name === "lobby_chat") {
+    const lobby = env.LOBBY.get(env.LOBBY.idFromName("global"));
+    if (args.message) await lobby.fetch("https://lobby/post", { method: "POST", body: JSON.stringify({ name: model?.name || "Claude", text: args.message }) });
+    const data = (await (await lobby.fetch("https://lobby/history?n=20")).json()) as {
+      chat: Chat[]; rooms: { id: string; red: string; yellow: string; score: string; status: string }[];
+    };
+    const lines = data.chat.map((m) => `[${m.name}] ${m.text}`).join("\n") || "(no messages yet)";
+    const rooms = data.rooms.map((r) => `  ${r.red} vs ${r.yellow} (${r.score}, ${r.status}) - ${origin}/r/${r.id}`).join("\n");
+    return { text: `${args.message ? "Posted.\n\n" : ""}General chat:\n${lines}${rooms ? `\n\nLive matches:\n${rooms}` : ""}` };
+  }
+
+  if (name === "my_stats") {
+    const lb = env.LEADERBOARD.get(env.LEADERBOARD.idFromName("global"));
+    const board = (await (await lb.fetch("https://lb/board?who=ai")).json()) as { rows: { name: string; wins: number; losses: number; draws: number; points: number }[] };
+    const ranking = board.rows.map((r, i) => `${i + 1}. ${r.name} - ${+r.points.toFixed(1)} pts (${r.wins}W ${r.losses}L ${r.draws}D)`).join("\n") || "(no AI games yet)";
+    if (!model) return { text: `AI ranking:\n${ranking}${noModel}` };
+    const me = board.rows.findIndex((r) => r.name === model.name);
+    return { text: `${model.name} (${model.id}) - shared account for every user's ${model.name}.\n` +
+      (me >= 0 ? `Rank #${me + 1} among AIs.` : "No recorded games yet.") + `\n\nAI ranking:\n${ranking}\n\nProfile: ${origin}/u/${encodeURIComponent(model.name)}` };
+  }
+
   const id = normaliseRoom(String(args.room ?? ""));
   if (!id) return { text: "Missing or invalid room code.", isError: true };
   const stub = roomStub(env, id);
+  const qs = [args.player ? `player=${encodeURIComponent(String(args.player))}` : "", mq].filter(Boolean);
+  const q = qs.length ? `?${qs.join("&")}` : "";
+  const sep = q ? "&" : "?";
 
   let res: Response;
-  if (name === "get_game") res = await stub.fetch("https://room/state?token=claude");
-  else if (name === "wait_for_my_turn") res = await stub.fetch("https://room/claude/wait?timeout=40");
+  if (name === "get_game") res = await stub.fetch(`https://room/claude/state${q}`);
+  else if (name === "wait_for_my_turn") res = await stub.fetch(`https://room/claude/wait${q}${sep}timeout=40`);
   else if (name === "play_move") {
     const col = Number(args.column) - 1;
-    res = await stub.fetch("https://room/claude/move", { method: "POST", body: JSON.stringify({ col, comment: args.comment ?? "" }) });
-  } else if (name === "rematch") res = await stub.fetch("https://room/claude/rematch", { method: "POST" });
+    res = await stub.fetch(`https://room/claude/move${q}`, { method: "POST", body: JSON.stringify({ col, comment: args.comment ?? "" }) });
+  } else if (name === "send_chat") {
+    res = await stub.fetch(`https://room/claude/chat${q}`, { method: "POST", body: JSON.stringify({ text: args.message ?? "" }) });
+  } else if (name === "rematch") res = await stub.fetch(`https://room/claude/rematch${q}`, { method: "POST" });
   else return { text: `Unknown tool ${name}`, isError: true };
 
-  const data = (await res.json()) as View & { state?: View };
   if (res.status === 404) return { text: `Room ${id} does not exist (rooms expire after a week of inactivity).`, isError: true };
+  const data = (await res.json()) as View & { state?: View; mode?: string };
+  if (!res.ok && !data.state) {
+    const hint = data.mode === "friend" ? " This is a two-player room for friends - Claude can't take a seat there." : "";
+    return { text: `${data.error}${hint}`, isError: true };
+  }
   const view = data.state ?? data;
-  if (view.mode && view.mode !== "claude") return { text: `Room ${id} is a two-player room for friends, not a Claude room.`, isError: true };
-  if (!res.ok) return { text: `${data.error}\n\n${data.state ? describe(data.state, origin) : ""}`.trim(), isError: true };
+  const chat = await stub.fetch("https://room/chat").then((r) => (r.ok ? (r.json() as Promise<Chat[]>) : [])).catch(() => [] as Chat[]);
+  if (!res.ok) return { text: `${data.error}\n\n${describe(view, origin, chat)}`, isError: true };
 
-  let text = describe(view, origin);
+  let text = describe(view, origin, chat);
   if (name === "wait_for_my_turn" && view.ready && view.winner === null && view.turn !== view.you) {
     text = "Still waiting for the opponent - call wait_for_my_turn again.\n\n" + text;
   }
   if (name === "play_move" && view.winner === null) text = "Move played.\n\n" + text + "\nNow call wait_for_my_turn.";
-  return { text };
+  if (name === "send_chat") text = "Message sent.\n\n" + text;
+  return { text: text + noModel };
 }
 
 type RpcMsg = { jsonrpc: "2.0"; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -149,7 +237,7 @@ async function handleOne(msg: RpcMsg, env: Env, origin: string) {
       return reply({
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "connect-four", title: "Connect Four", version: "1.0.0" },
+        serverInfo: { name: "connect-four", title: "Connect Four", version: "1.2.0" },
         instructions: INSTRUCTIONS.replace("{origin}", origin),
       });
     }

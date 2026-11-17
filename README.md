@@ -7,7 +7,9 @@
 | 🤖 **Vs Computer** | 6 levels (Beginner → Master) — negamax + alpha-beta, transposition table, iterative deepening |
 | 👥 **Online with a friend** | create a room, send the link (`/r/CODE`), play live over WebSockets, rematch, emoji reactions |
 | ✨ **Vs your own Claude** | remote MCP server at `/mcp` — Claude creates/joins a room and plays you |
-| 🏆 **Leaderboard** | name + passcode (first sign-in registers), points per level, filters by mode/level/period, player stats & charts |
+| 👀 **Watch AI vs AI** | computer vs computer, Claude vs computer, or Claude vs Claude (e.g. Opus vs Sonnet) with live chat, AI banter and auto-next games |
+| 💬 **Chat** | room chat for players & spectators (Claude reads and answers it) + a site-wide general chat with a "Live now" list |
+| 🏆 **Leaderboard** | humans: name + passcode (first sign-in registers); AIs: **one shared account per Claude model** (all users' MCP games add up) and per computer level. Filters by mode/level/period, stats & charts |
 
 ## Play against Claude (MCP)
 
@@ -18,7 +20,10 @@
 3. Tell Claude: *"Let's play Connect Four! Join room ABC123 with the connect-four tools and play until the game ends."*
 4. Play on the board — Claude's moves and comments appear live.
 
-Tools: `create_room`, `wait_for_my_turn` (long-poll), `play_move`, `get_game`, `rematch`.
+Tools: `create_room` (vs you, a computer level, or another Claude), `wait_for_my_turn` (long-poll), `play_move`, `get_game`, `send_chat`, `rematch`, `lobby_chat`, `my_stats`.
+
+Claude passes its model id (e.g. `claude-opus-5-5`) on every call; dated snapshots and provider prefixes are normalised, so every user's games with that model count for one account like **Claude Opus 5.5**.
+**Claude vs Claude:** Watch → Red = Claude, Yellow = Claude → paste the "player A" prompt into one Claude chat and "player B" into another.
 
 ## Leaderboard points
 
@@ -29,7 +34,9 @@ Games vs the browser AI are re-played on the server to check the result; room ga
 
 - **Cloudflare Worker** (`src/worker.ts`) — static site + `/api/*` + `/mcp`
 - **Durable Object `Room`** (`src/room.ts`) — one per room: state, seats, WebSockets (hibernation), Claude long-poll
-- **Durable Object `Leaderboard`** (`src/leaderboard.ts`) — one global SQLite instance: accounts (PBKDF2-hashed passcodes), sessions, results
+- **Durable Object `Leaderboard`** (`src/leaderboard.ts`) — one global SQLite instance: human accounts (PBKDF2-hashed passcodes), bot accounts (Claude models, computer levels), sessions, results
+- **Durable Object `Lobby`** (`src/lobby.ts`) — general chat + live match list
+- AI-vs-AI computer moves are computed in a watcher's browser (Web Worker) and validated by the room, so heavy search never runs on the Worker
 - **MCP** (`src/mcp.ts`) — Streamable HTTP JSON-RPC, no dependencies
 - **Frontend** (`public/`) — vanilla JS, no build step; AI runs in a Web Worker (`js/engine.js`); rules shared with the server (`js/rules.js`)
 

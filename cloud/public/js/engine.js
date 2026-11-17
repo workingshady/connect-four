@@ -17,8 +17,13 @@ const WIN = 1_000_000;
 const CELL_WINDOWS = Array.from({ length: CELLS }, () => []);
 for (const w of WINDOWS) for (const i of w) CELL_WINDOWS[i].push(w);
 const CENTER = Array.from({ length: CELLS }, (_, i) => (Math.floor(i / ROWS) === 3 ? 1 : 0));
-const Z = [null, [], []];
-for (let p = 1; p <= 2; p++) for (let i = 0; i < CELLS; i++) Z[p].push((Math.random() * 2 ** 31) | 0);
+// Zobrist keys: 32 + 21 random bits per (player, cell) -> a 53-bit position key (safe integer).
+// A 31-bit key collided often enough with millions of cached positions to make Master blunder.
+const Z = [null, [], []], Z2 = [null, [], []];
+for (let p = 1; p <= 2; p++) for (let i = 0; i < CELLS; i++) {
+  Z[p].push((Math.random() * 2 ** 32) >>> 0);
+  Z2[p].push(Math.floor(Math.random() * 2 ** 21));
+}
 
 class Timeout extends Error {}
 
@@ -28,6 +33,7 @@ class Search {
     this.h = new Int8Array(COLS);
     this.n = 0;
     this.hash = 0;
+    this.hash2 = 0;
     this.tt = new Map();
     this.nodes = 0;
     this.deadline = deadline;
@@ -38,6 +44,7 @@ class Search {
     const p = (this.n % 2) + 1;
     this.board[i] = p;
     this.hash ^= Z[p][i];
+    this.hash2 ^= Z2[p][i];
     this.h[c]++;
     this.n++;
   }
@@ -46,6 +53,7 @@ class Search {
     this.n--;
     const i = idx(c, this.h[c]);
     this.hash ^= Z[this.board[i]][i];
+    this.hash2 ^= Z2[this.board[i]][i];
     this.board[i] = 0;
   }
   winsAt(i, p) {
@@ -56,6 +64,9 @@ class Search {
       if (ok) return true;
     }
     return false;
+  }
+  key() {
+    return (this.hash >>> 0) * 2097152 + this.hash2;
   }
   evaluate(p) {
     const b = this.board, o = 3 - p;
@@ -85,7 +96,8 @@ class Search {
     if (depth <= 0) return this.evaluate(p);
 
     const alpha0 = alpha;
-    const e = this.tt.get(this.hash);
+    const key = this.key();
+    const e = this.tt.get(key);
     let ttMove = -1;
     if (e) {
       ttMove = e.m;
@@ -118,14 +130,14 @@ class Search {
       if (alpha >= beta) break;
     }
     if (this.tt.size > 2_000_000) this.tt.clear();
-    this.tt.set(this.hash, { d: depth, f: best <= alpha0 ? 2 : best >= beta ? 1 : 0, v: best, m: bestCol });
+    this.tt.set(key, { d: depth, f: best <= alpha0 ? 2 : best >= beta ? 1 : 0, v: best, m: bestCol });
     return best;
   }
   root(depth, randomTies) {
     const p = (this.n % 2) + 1;
     const cols = ORDER.filter((c) => this.h[c] < ROWS);
     for (const c of cols) if (this.winsAt(idx(c, this.h[c]), p)) return { col: c, score: WIN };
-    const tt = this.tt.get(this.hash);
+    const tt = this.tt.get(this.key());
     if (tt && cols.includes(tt.m)) cols.sort((a, b) => (b === tt.m) - (a === tt.m));
     let alpha = -2 * WIN;
     const scores = new Map();
